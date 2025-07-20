@@ -1,0 +1,652 @@
+#!/bin/bash
+#!/usr/bin/env -S nice -n 19 bash
+source buffermaker
+source bxstr
+
+fix-0.11.7-Ex
+load-default-config
+stty -echo
+
+hooks+=(
+	[die]='finish'
+)
+
+function finish {
+	stty echo
+	send-cmd quit
+	rm "$socket"
+}
+zvu_f=(
+	#header "$(:weight bold :background light-cyan :foreground black)"
+	header "$(:weight bold :foreground light-cyan :underline t)"
+	statusbg "$(:foreground light-yellow)"
+	line-number "$(:weight dim :foreground cyan)"
+	line-number-current-line "$(:weight bold :foreground light-cyan :mode inverse)"
+	list '\e[m'
+#	list "\e[m$(:foreground blue :weight bold)"
+	list-alt "\e[m$(:foreground white :slant italic :weight dim)"
+	list-link "$(:foreground magenta )"
+)
+load-theme zvu_f
+
+declare-buffer title
+bf_d+=(
+	[mode]=basic
+	[syntax]=syntax-none
+	[syntax-exec]=0
+	[render-type]=per-line
+	[background]=header
+	[line]=1
+)
+buffer=(
+	''
+	'ZVUk MPV AUDIO PLAYER    ©Netkv 2025'
+)
+
+
+add-mode basic
+:: '[left]' format-left
+:: '[right]' goto-list
+:: '[down]' format-down
+:: RET link-enter
+:: C-c die
+mode-options
+:: else :
+		
+declare-buffer side
+bf_d+=(
+	[mode]=basic
+	[syntax]=syntax-format
+	[syntax-exec]=1
+	[render-type]=per-char
+	[line]=1
+)
+buffer=(
+	''
+	'<o> id: file select: toggle-info text: <f> hint-highlight F </f> <> <f> hint ile </f> </o>'
+	'<o> id: open select: picker.open text: <f> hint-highlight O </f> <> <f> hint pen </f> </o>'
+	'<o> id: shuffle select: shuffle text: <f> hint-highlight S </f> <> <f> hint huffle </f> </o>'
+	'<o> id: reverse select: reverse text: <f> hint-highlight R </f> <> <f> hint everse </f> </o>'
+	'<o> id: quit select: die text: <f> hint-highlight Q </f> <> <f> hint uit </f> </o>'
+	'<o> id: output select: file-info text: <f> hint M </f> <> <f> hint ore info  </f> </o>'
+	''
+)
+function picker.open {
+	state=paused
+	file-picker . picker.finish
+}
+function picker.finish {
+	open-playlist "$1"; set-buffer status
+	setsizes
+}
+
+function make-render-line-loop-line-wide-hack {
+	local -i comment=0
+	local -i skip_next_space=0
+	
+	local word=''
+	bf_e[line]=''
+
+	for _link in ${bf_c[line]}; do
+		unset "$_link"
+	done
+	unset bf_c[line]
+	
+	column=0
+	coproc {
+		if (("${#buffer[line+1]}" > (bf_d[size-x]/2) )); then
+			word="$(string:sub 0 $((bf_d[size-x]-3)) "${faces_raw[list-alt]}${buffer[line+1]}")"
+		else
+			echo "${faces_raw[list-alt]}${buffer[line+1]}"
+		fi
+	}
+	if (("${#buffer[line]}" > (bf_d[size-x]/2) )); then
+		word="$(string:sub 0 $((bf_d[size-x]-3)) "${buffer[line]}")"
+	else
+		word="${buffer[line]}"
+	fi
+	while IFS='' read -r; do other="$REPLY"; break; done <&"${COPROC[0]}"	
+	syntax-word
+	
+	((line++))
+	local -i syntaxline=$line
+	local -n linearray="${current_buffer}_syntax${syntaxline}"
+	bf_s[syntaxline]="${current_buffer}_syntax${syntaxline}"
+	linearray=()
+	bckeIFS="${IFS}"
+	IFS=
+	local -a s
+	local -i comment=0
+	local -i skip_next_space=0
+	local word=''
+	bf_e[line]=''
+	for _link in ${bf_c[line]}; do
+		unset "$_link"
+	done
+	unset bf_c[line]
+	column=0
+	word="$other"
+	syntax-word
+}
+
+
+declare-buffer playlist
+bf_d+=(
+	[mode]=basic
+	[syntax]=syntax-playlist
+	[syntax-exec]=0
+	[bxrender-function]='make-render-line-loop-line-wide-hack'
+	[background]=list
+	[line]=1
+)
+bf_h=(
+	[redraw.content begin]=linenum.begin
+	[redraw.content loop-begin]=linenum.loop-begin
+	[redraw.cursor pre-redraw]=linenum.update
+)
+function setsizes {
+	set-buffer title
+	bf_d+=(
+		[size-y]=1
+		[size-x]="$COLUMNS"
+	)
+	redraw
+	set-buffer side
+	bf_d+=(
+		[loc-y]=2
+		[size-y]="$((LINES-5))"
+		[size-x]=10
+		[loc-x]=1
+	)
+	redraw
+	set-buffer playlist
+	bf_d+=(
+		[loc-y]=2
+		[size-y]="$((LINES-5))"
+		[size-x]="$((COLUMNS-10))"
+		[loc-x]=11
+	)
+	redraw
+	set-buffer status
+	bf_d+=(
+		[loc-y]="$((LINES-3))"
+		[size-y]=4
+		[size-x]="$COLUMNS"
+	)
+	redraw
+}
+
+function syntax-playlist {
+	set-face list
+	case "$word" in
+		*'.m3u'|*'.m3u8') set-face list-link;;
+	esac
+}
+
+function load-tags {
+	declare -Ag "$1"
+    local -n tags="$1"
+    local file="$2"
+    
+    while IFS='=' read -r key value; do
+		key=$(echo "$key" | tr '[:lower:]' '[:upper:]' | tr ' ' '_')
+        tags["$key"]="$value"
+    done < <(
+		ffprobe -v error -select_streams a:0 -show_entries format_tags -of flat=s=_ "$file" |
+			sed -E 's/format_tags\.//g' |
+			tr -d '"'
+	)
+}
+
+function preset {
+	base-name "$1"
+}
+function open-playlist {
+	just_open=1
+	set-buffer playlist
+	clear-render
+	buffer=()
+	list=()
+	bf_d[line]=1
+	mapfile -t -O 1 list < "$1"
+	transform-array preset list buffer
+}
+function open-dir {
+	just_open=1
+	set-buffer playlist
+	clear-render
+	buffer=()
+	list=()
+	bf_d[line]=1
+	mapfile -t -O 1 list <<< "$(list-directory)"
+	
+	transform-array preset list buffer
+}
+function open-stdin {
+	just_open=1
+	set-buffer playlist
+	clear-render
+	buffer=()
+	list=()
+	bf_d[line]=1
+
+	IFS=$'\n'
+	list=('')
+	while read -r line; do
+		list+=("$line")  
+	done
+	
+	transform-array preset list buffer
+}
+function shuffle {
+	copy-array list bck
+
+	just_open=1
+	set-buffer playlist
+	clear-render
+	list=()
+	bf_d[line]=1
+	print-array bck | shuf | mapfile -t -O 1 list
+	transform-array preset list buffer
+	redraw
+	set-buffer status
+	redraw
+}
+
+function reverse {
+	copy-array list bck
+	just_open=1
+	set-buffer playlist
+	clear-render
+	list=()
+	bf_d[line]=1
+	reverse-array bck list
+	transform-array preset list buffer
+	redraw
+	set-buffer status
+	redraw
+}
+
+declare-buffer status
+bf_d+=(
+	[mode]=control
+	[syntax]=syntax-status
+	[syntax-exec]=0
+	[render-type]=per-frag
+	[background]=statusbg
+	[line]=1
+)
+buffer=(
+	''
+)
+function syntax-status {
+	set-face hint
+	case "$word" in
+		*':') set-face title;;
+	esac
+}
+
+add-mode control
+	:: '[up]' list-prev
+	:: '[down]' list-next
+	:: '[right]' seek-forth
+	:: '[left]' seek-back
+	:: 'DEL' goto-side
+	:: C-k act
+	:: "$(kbd f)" toggle-info
+	:: "$(kbd o)" picker.open
+	:: "$(kbd s)" shuffle
+	:: "$(kbd r)" reverse
+	:: "$(kbd q)" die
+	:: SPC toggle
+	:: RET play
+	:: C-c die
+	mode-options
+		:: else :
+
+
+
+act=(
+	text: '!?'
+		face: menu-highlight
+	text: a
+		cmd: :
+	text: b
+		cmd: :
+		face: menu-divider
+	text: Closeaaaaaaaaaaaa
+		cmd: menu.exit
+	text: Quit
+		cmd: die
+)
+menu.add act
+function act {
+	menu_act_0[0]=' hello '
+	menu_act_0[1]=' hello '
+	menu_act_0[2]=' hello '
+	menu.layout act
+	bf_d[menu_x]=$((playlist_bf_d[loc-x] + 2))
+	bf_d[menu_y]=$((playlist_bf_d[loc-y] + playlist_bf_d[line] -1))
+	menu act
+}
+function goto-side {
+	set-buffer side
+	redraw.cursor
+}
+function goto-list {
+	get-status
+}
+function list-next {
+	set-buffer playlist
+	format-down
+	set-buffer status
+}
+function list-prev {
+	set-buffer playlist
+	format-up
+	set-buffer status
+}
+function play {
+	set-buffer playlist
+	send-cmd stop
+	send-cmd-arg3 loadfile "${list[${bf_d[line]}]}" append-play
+	load-tags t "${list[${bf_d[line]}]}"
+	format-down
+
+	artist="${t[FORMAT_TAGS_ARTIST]}"
+	title="${t[FORMAT_TAGS_TITLE]}"
+	set-buffer status
+	get-status
+}
+function toggle {
+	echo '{ "command": ["cycle", "pause"] }' | sock
+	get-status
+}
+
+function toggle-info {
+	if ((options[info-name]==0))
+	then options[info-name]=1
+	else options[info-name]=0
+	fi
+	get-status
+}
+
+function get-status {
+	[ ! "$current_buffer" = status ] && return
+	set-buffer status
+	currentfile="$(
+		echo '{ "command": ["get_property", "path"] }' | socat - "$socket" | jq -r '.data'
+			   )"
+	[ "${currentfile}" = 'null' ] && {
+		set-buffer playlist
+		send-cmd stop
+		send-cmd-arg3 loadfile "${list[${bf_d[line]}]}" append-play
+		format-down
+		set-buffer status
+		((just_open==1)) && {
+			just_open=0
+			toggle
+		}
+		return
+	}
+	bitrate="$(
+   		echo '{ "command": ["get_property", "audio-bitrate"] }' | socat - "$socket" | jq -r '.data'
+			 )"
+	filesize="$(
+		echo '{ "command": ["get_property", "file-size"] }' | socat - "$socket" | jq -r '.data'
+			 )"
+	totaltime="$(
+		echo '{ "command": ["get_property", "duration"] }' | socat - "$socket" | jq -r '.data'
+			 )"
+	currenttime="$(
+		echo '{ "command": ["get_property", "time-pos"] }' | socat - "$socket" | jq -r '.data'
+			   )"
+	case "$(
+			echo '{ "command": ["get_property", "pause"] }' | socat - "$socket" | jq -r '.data'
+		)" in
+		true)
+			state="paused"
+			_i=0
+			printf '\e[38;5;51m\e[%s;8H%s\e[%s;16H%s\e[m' "$((_i+4))" "▄▄▄" "$((_i+4))" "▄▄▄"
+			for ((_i=1;i<7;i++)); do
+				printf '\e[38;5;51m\e[%s;8H%s\e[38;5;16m%s\e[38;5;51m\e[%s;16H%s\e[38;5;16m%s\e[m' "$((_i+4))" "███" '█' "$((_i+4))" "███" '█'
+				((_i++))
+			done
+			printf '\e[38;5;16m\e[%s;9H%s%s\e[%s;17H%s%s\e[m' "$((_i+4))" "▀▀" '▀' "$((_i+4))" "▀▀" '▀'
+			;;
+		false)
+			state="playing"
+			set-buffer side; redraw
+			set-buffer playlist; redraw
+			set-buffer status
+			;;
+		*) state=idk
+	esac
+	# "${title}"
+	if ((options[info-name]==0))
+	then
+		buffer=(
+			''
+			"Playing: $(base-name "${currentfile}")"
+			"time:    ${currenttime}/${totaltime}"
+			"State:   ${state}"
+			"Artist:  ${artist}"
+		)
+	else
+		buffer=(
+			''
+			"File: $(base-name "${currentfile}")"
+			"Rate: $((bitrate/1000))kb/s Total: $((filesize / 1024 / 1024))MiB"
+			"Type: $(file -b "${currentfile}")"
+			"Path: $(dir-name "${currentfile}")"
+		)
+	fi
+	bf_s=()
+	redraw.content
+}
+function seek-forth {
+	echo '{ "command": ["seek", 5, "relative"] }' | sock
+	get-status
+}
+function seek-back {
+	echo '{ "command": ["seek", -5, "relative"] }' | sock
+	get-status
+}
+
+socket="/tmp/zvu-mpv-${$}.sock"
+mpv --idle=yes\
+	--no-video\
+	--no-audio-display\
+	--vo=null\
+	--input-ipc-server="${socket}" > /dev/null 2>&1 < /dev/null &
+
+function send-cmd-arg3 {
+	echo '{ "command": ["'"${1}"'", "'"${2}"'", "'"${3}"'"] }' |
+		sock
+}
+function send-cmd {
+	echo '{ "command": ["'"${1}"'"] }' |
+		sock
+}
+function sock {
+	socat - "$socket" >/dev/null
+}
+
+function zvu:main {
+	while :; do
+		local -a k=()
+		local -i i=1
+		k_hex=() # Also convert the input sequence into hex for way easier handling
+		# Check for ready input
+		if {
+			# if we're paused, do not keep redrawing and wasting precious cpu cycles
+			if [ "$state" = "paused" ]; then
+				read -rsN1 k[0]
+				idle=0
+			else
+				#todo implement idle detection
+				read -rsN1 -t 1 k[0]
+			fi
+		}; then
+			k_hex[0]="$(printf "%x\n" "'${k[0]}")"
+
+			# Hack to try preventing arrow codes being split into multiple and inserting garbage to buffer
+			[ "${k_hex[0]}" = '1b' ] && {
+				read -rsN1 -t "${esc_timeout}" k[1]
+				k_hex[1]="$(printf "%x\n" "'${k[1]}")"
+				[ "${k_hex[1]}" = '5b' ] && {
+					read -rsN1 k[2]
+					k_hex[2]="$(printf "%x\n" "'${k[2]}")"
+					case "${k_hex[2]}" in
+						'41'|'42'|'43'|'44')
+							k_hex[3]='0'
+							keypress "${k[@]}"
+							continue
+					esac
+					i=2
+				}
+				((i++))
+			}
+			# Multibyte hack
+			while read -rsN1 -t0.0001 k[$i]; do
+				k_hex[$i]="$(printf "%x\n" "'${k[$i]}")"
+				((i++))
+			done
+			k_hex[$i]='0'
+			keypress "${k[@]}" # Handle keypress event
+		else
+			prevl="$LINES"
+			prevc="$COLUMNS"
+			shopt -s checkwinsize && (:;:)
+			[ ! "$prevl" -eq "$LINES" ] || [ ! "$prevc" -eq "$COLUMNS" ] && {
+				clear-screen
+				set-buffer playlist
+				bf_s=()
+				setsizes
+			}
+			get-status
+		fi
+	done
+}
+
+
+
+
+
+
+
+########################################################################
+## TODO: make part of bxplatform layer II (and REDO: in sane way)
+declare-buffer info
+bf_d+=(
+	[line]=1
+	[column]=0
+	[mode]=basic
+	[syntax]=syntax-format
+	[syntax-exec]=1
+	[render-type]=per-char
+)
+declare-buffer infobg
+bf_d+=(
+	[mode]=empty
+	[syntax]=syntax-none
+	[syntax-exec]=0
+	[render-type]=per-word
+	[background]=header
+)
+buffer=(
+	''
+	'File properties'
+)
+
+
+function file-info {
+	set-buffer playlist
+	local file="${list[bf_d[line]]}"
+
+	set-buffer infobg
+	bf_d[size-x]=$((COLUMNS/2+2))
+	bf_d[size-y]=$((LINES/2+2))
+	bf_d[loc-x]=$((COLUMNS/4-1))
+	bf_d[loc-y]=$((LINES/4-1))
+	redraw
+	
+	set-buffer info
+	bf_d[size-x]=$((COLUMNS/2))
+	bf_d[size-y]=$((LINES/2))
+	bf_d[loc-x]=$((COLUMNS/4))
+	bf_d[loc-y]=$((LINES/4))
+#	set-linenum
+	
+	clear-buffer
+	get-file-info "$file"
+	redraw
+	obj quit
+}
+function get-file-info {
+	buffer=(
+		''
+		''
+' <o> id: next select: info-next up: : left: : right: obj previous text: <f> button <f> button-hint N </f-> ext </f> </o> '\
+'<o> id: previous select: info-previous up: : left: obj next right: obj quit text: <f> button <f> button-hint P </f-> revious </f> </o> '\
+'<o> id: quit select: info-quit up: : left: obj previous right: : text: <f> button <f> button-hint Q </f-> uit </f> </o>'
+		"<f> divider <lp> &line x/2-s/2 <f> title $1 </f> </lp> <> <lp> &line x/2-s[-2]/2 </lp> </f>"
+		''
+		"<-> $(file -b "$1")"
+		''
+		"size <f> title $(du -h -- "$1" | cut -f1) </f>"
+	)
+	[ -f "$file" ] &&
+		buffer+=("lines <f> title $(wc -l < "$1") </f> words <f> title $(wc -w < "$1") </f> chars <f> title $(wc -m < "$1") </f>")
+	buffer+=(
+		"owner <f> title $(stat -c %U "$1") </f> (group <f> title $(stat -c %G "$1") <-f> default ) </f> </f>"
+		"permissions <f> title $(stat -c %A "$1") </f>"
+		''
+		"created at $(stat -c %w "$1")"
+		"last access at $(stat -c %x "$1")"
+		"last modifiction $(stat -c %y "$1")"
+		"last status change $(stat -c %z "$1")"
+		''
+		'<f> divider <lp> &line x </lp> </f>'
+	)
+	[ -b "$1" ] && buffer+=("<f> dim block special </f>")
+	[ -c "$1" ] && buffer+=("<f> dim char special </f>")
+	[ -e "$1" ] && buffer+=("<f> dim exists </f>")
+	[ -d "$1" ] && buffer+=("<f> dim dir </f>")
+	[ -f "$1" ] && buffer+=("<f> dim regular </f>")
+	[ -g "$1" ] && buffer+=("<f> dim set-group-ID </f>")
+	[ -G "$1" ] && buffer+=("<f> dim owner by effective group-ID </f>")
+	[ -L "$1" ] && buffer+=("<f> dim symlink")
+	[ -k "$1" ] && buffer+=("<f> dim sticky")
+	[ -O "$1" ] && buffer+=("<f> dim owned by effective user-id </f>")
+	[ -p "$1" ] && buffer+=("<f> dim named pipe </f>")
+	[ -r "$1" ] && buffer+=("<f> dim read permission </f>")
+	[ -s "$1" ] && buffer+=("<f> dim size greater 0 </f>")
+	[ -S "$1" ] && buffer+=("<f> dim socket </f>")
+	[ -u "$1" ] && buffer+=("<f> dim set-user-ID </f>")
+	[ -w "$1" ] && buffer+=("<f> dim write permission granted </f>")
+	[ -x "$1" ] && buffer+=("<f> dim execute/search granted </f>")
+}
+########################################################################
+
+
+
+
+
+
+
+
+if [ -n "$1" ]; then
+	if [ -f "$1" ]; then
+		open-playlist "$1"
+	elif [ -d "$1" ]; then
+		open-dir "$1"
+	fi
+else
+	open-stdin
+fi
+
+init-var
+setsizes
+zvu:main < /dev/tty
+stty echo
