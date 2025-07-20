@@ -1,0 +1,3884 @@
+#!/bin/bash
+#!/usr/bin/env -S nice -n 19 bash
+#!/bin/bash
+buffermaker_version="0.11.8.1-zvu-integrated"
+#bxbuffer_version="0"
+## Buffermaker
+# Pure bash tui framework (wip)
+
+shopt -s lastpipe # For syntax highlighting
+#shopt -s extglob # Ensure advanced pattern matching is available
+shopt -s checkwinsize && (:;:) # Enable and then trigger a terminal size refresh
+
+declare -r DEFIFS="$IFS"
+declare -A highlight faces faces_raw options charmap hooks resources
+declare -A keys_global
+declare -a k_hex buffers_l modes=('keys_global')
+declare -n buffer bf_s bf_e bf_d
+declare -i ismenu comment current_count
+declare reset readin
+
+#!/bin/bash
+bxcommon_version="0.2.3 I,II,"
+### collection of useful bash functions
+### part of bashbox/buffermaker BashOS project
+function deprecated:replace { eval "function ${1} { warn \"${1} is deprecated, use ${2}\"; ${2}; }"; }
+
+function is:command { command -v "$1" >/dev/null 2>&1; }
+deprecated:replace has-command is:command
+function is:dir { test -d "${1}"; }
+function is:file { test -f "${1}"; }
+function is:empty { test -z "${1}"; }
+function is:function { declare -F "${1}" > /dev/null; }
+function isnot:empty { test -n "${1}"; }
+function ifnot:mkdir { is:dir "${1}" || mkdir "${1}"; }
+function ifnot:touch { is:file "${1}" || touch "${1}"; }
+
+function async-loop {
+	is:command async-loop:block || error 'async-loop:block() not defined'
+	for __async_arg in "${@}"; {
+		async-loop:block "${__async_arg}" &
+	}
+	unset async-loop:block
+}
+
+function loop {
+	is:command loop:block || error 'loop:block() not defined'
+	__times="${1}"
+	shift
+	for ((i=0;i<=__times - 1;i++)); {
+		loop:block "${@}" 
+	}
+
+	unset loop:block
+}
+
+function mk:case {
+	declare  _c__name="$1"
+	declare -a "${_c__name}"
+	declare -n _c__target="${_c__name}"
+	declare -i _c__i=0
+	function + {
+		_c__target+=("${1::-1}")
+		declare -a "${_c__name}${1::-1}"
+		declare -n _c__sub="${_c__name}${1::-1}"
+		shift
+		for _c__it in "$@"; do
+			_c__sub+=("${_c__it}")
+		done
+		((_c__i++))
+	}
+	function }, {
+		unset mk:case
+		unset +
+		unset },
+	}
+}
+
+
+function need:command { is:command "$1" || error "command ${1} not found"; }
+function need:function { declare -F "${1}" > /dev/null || error "function ${1} not defined"; }
+deprecated:replace need-command need:command
+function neednot:empty { [ -z "${1}" ] && error "variable ${1} is empty"; }
+deprecated:replace need-not-empty neednot:empty
+deprecated:replace need-not-empty-value neednot:empty
+
+function need {
+	#exit if var doesnt match expectation
+	local -n source="$1"
+	local target="$2"
+	[ "${source}" = "${target}" ] || error "variable ${1} isn't expected ${2}"
+}
+function need-value {
+	#exit if var doesnt match expectation
+	local source="$1"
+	local target="$2"
+	[ "${source}" = "${target}" ] || error "variable ${1} doesn't have expected value ${2}"
+}
+function need-array-item {
+	#exit if var doesnt match expectation
+	local -n source="$1" 
+	local target="$2"
+	local _has=no
+	for idx in "${!source[@]}"; {
+		[ "${source[idx]}" = "${target}" ] && _has=yes && return
+	}
+	error "array ${1} doesn't have expected item with value ${2}"
+}
+function need-file {
+	[ -f "${1}" ] || error "file ${1} doesn't exist"
+}
+function need-directory {
+	[ -d "${1}" ] || error "directory ${1} doesn't exist"
+}
+
+function error {
+	printf '\e[31;1m[error] \e[0;31m%s\e[m\n' "$@"
+	exit 1
+}
+function warn {
+	printf '\e[33;1m[warn] \e[0;33m%s\e[m\n' "$@"  >&2
+}
+
+## copy-array
+# A univeral function to copy both normal and associative arrays
+function copy-array {
+	local -n source="$1"
+	local -n target="$2"
+	target=()
+	for idx in "${!source[@]}"; {
+		target["${idx}"]="${source[${idx}]}"
+	}
+}
+function reverse-array {
+	local -n source="$1"
+	local -n target="$2"
+	target=()
+	for ((idx=${#source[@]} - 1, idxs=0; idx>=0; idx--, idxs++)); {
+		target[idxs]="${source[idx]}"
+	}
+}
+
+function transform-array {
+#	local function="${1:1:-1}"
+	local -n source="${2}"
+	local -n target="${3}"
+	target=()
+	for idx in "${!source[@]}"; {
+		target["${idx}"]="$("${1}" "${source[${idx}]}")"
+	}
+}
+
+function validate {
+	local -n source="$1"
+	local target="$2"
+	[ "$source" = "$target" ] || error "Function validation failed for property $1 of value $source, expected $target"
+}
+
+## append-array
+# Append array \$1 to \$2  
+function append-array {
+	local -n source="$1"
+	local -n target="$2"
+	for idx in "${!source[@]}"; {
+		target+=("${source[${idx}]}")
+	}
+}
+
+function arg-copy {
+	local -n target="$1"
+	shift
+	for ((i=1;i<=$#;i++)); do
+		target[i]="${!i}"
+	done
+}
+
+function arg-append {
+	local -n target="$1"
+	shift
+	for ((i=1;i<=$#;i++)); do
+		target+=("${!i}")
+	done
+}
+
+function print-array {
+	local -n source="$1"
+	for idx in "${!source[@]}"; {
+		echo "${source[idx]}"
+	}
+}
+function debug-array {
+	local -n source="$1"
+	for idx in "${!source[@]}"; {
+		printf 'array(\e[1;32m%s\e[m) value(\e[1;35m%s\e[m)\n' "${1}" "${source[idx]}"
+	}
+}
+
+function copy-function {
+	local -a fn
+	local deffn="function $2"$'\n'
+	mapfile fn <<<"$(declare -f "$1")"
+	for ((i=1; i<${#fn[@]}; i++)) {
+		deffn+="${fn[i]}"
+	}
+	eval "$deffn"
+}
+
+function count {
+	for ((__bx_common_i=0; __bx_common_i<${1}; __bx_common_i++)) {
+		echo "$__bx_common_i"
+	}
+}
+
+## _ Variable refernce helper
+function _ {
+	# this function is here to simplify stuff as writing overlong variables indexed by overloong variable index...
+	# ...is quite tiring <3
+	[ -z "$1" ] && {
+		for n in "${refalias[@]}"; do
+			unset "$n"
+		done
+		unset refalias
+		return
+	}
+	declare -gn "$1"="$2"
+	refalias+=("$1")
+}
+
+## __ Swap variable references
+function __ {
+	# swap two references
+	local -n _swap_1="$1"
+	local _swap_copy_1="${!_swap_1}"
+	local -n _swap_2="$2"
+	local _swap_copy_2="${!_swap_2}"
+	declare -gn "$1"="${_swap_copy_2}"
+	declare -gn "$2"="${_swap_copy_1}"
+}
+
+
+## setface Convert colors to escape codes
+# '$1' can be either one of colors:
+#     black
+#     red
+#     green
+#     yellow
+#     blue
+#     magenta
+#     cyan
+#     ligth-gray
+#     gray
+#     light-red
+#     light-green
+#     light-yellow
+#     light-blue
+#     light-magenta
+#     light-cyan
+#     white
+# 'or hex. color (like "#bb2040")'
+# 'or indexed 256 color with "c" as prefix (like c127)'
+# 'for background color $mode has to be 48 and for foreground 38'
+#
+# If \$TERM \(current "$TERM"\) is \'linux\' \& option tty-linuxfb is 1 try to use true color even for tty
+# Instead of normal '\e[$mode;r;g;bm' is used '\e]P$~1mode$Hexcode\e[$~2modem'
+#     '$mode 38 → $~1mode 2 & $~2mode 32'
+#     '$mode 48 → $~1mode 1 & $~2mode 41'
+# Note that the linuxfb colors are very experimental and suffer from cursor implicitly overwriting them on movenment
+function setface {
+	[ -z "$1" ] && return
+	case "$1" in
+		black)      [ "$mode" = '38' ] && printf '\\e[30m' || printf '\\e[40m';;
+		red)        [ "$mode" = '38' ] && printf '\\e[31m' || printf '\\e[41m';;
+		green)      [ "$mode" = '38' ] && printf '\\e[32m' || printf '\\e[42m';;
+		yellow)     [ "$mode" = '38' ] && printf '\\e[33m' || printf '\\e[43m';;
+		blue)       [ "$mode" = '38' ] && printf '\\e[34m' || printf '\\e[44m';;
+		magenta)    [ "$mode" = '38' ] && printf '\\e[35m' || printf '\\e[45m';;
+		cyan)       [ "$mode" = '38' ] && printf '\\e[36m' || printf '\\e[46m';;
+		light-gray) [ "$mode" = '38' ] && printf '\\e[37m' || printf '\\e[47m';;
+
+		gray)          [ "$mode" = '38' ] && printf '\\e[90m' || printf '\\e[100m';;
+		light-red)     [ "$mode" = '38' ] && printf '\\e[91m' || printf '\\e[101m';;
+		light-green)   [ "$mode" = '38' ] && printf '\\e[92m' || printf '\\e[102m';;
+		light-yellow)  [ "$mode" = '38' ] && printf '\\e[93m' || printf '\\e[103m';;
+		light-blue)    [ "$mode" = '38' ] && printf '\\e[94m' || printf '\\e[104m';;
+		light-magenta) [ "$mode" = '38' ] && printf '\\e[95m' || printf '\\e[105m';;
+		light-cyan)    [ "$mode" = '38' ] && printf '\\e[96m' || printf '\\e[106m';;
+		white)         [ "$mode" = '38' ] && printf '\\e[97m' || printf '\\e[107m';;
+		*) case "${1::1}" in
+			   '#')
+				   local r="${1:1:2}"
+				   local g="${1:3:2}"
+				   local b="${1:5:2}"
+				   printf '\\e[%d;2;%d;%d;%dm' "${mode}" $((16#$r)) $((16#$g)) $((16#$b))
+				   ;;
+			   'c')
+				   printf '\\e[%d;5;%dm' "${mode}" "${1:1}"
+		   esac
+	esac
+	shift
+	[ -n "$1" ] && "$@";
+}
+
+## :foreground
+# Set foreground color.
+# 'See <a> doc-goto setface : <f> link setface </f> </a> for more info.'
+function :foreground { mode=38; setface "$@"; }
+
+## :background
+# Set background color.
+# 'See <a> doc-goto setface : <f> link setface </f> </a> for more info.'
+function :background { mode=48; setface "$@"; }
+
+## :mode Sets text mode:
+# '	inverse - inverses background and foreground'
+function :mode {
+	case "$1" in
+		inverse) printf '\\e[7m';;
+	esac
+	shift
+	[ -n "$1" ] && "$@";
+}
+	
+## :weight Sets thickness of text:
+#     bold
+#     dim
+#     normal
+function :weight {
+	case "$1" in
+		bold) printf '\\e[1m';;
+		dim) printf '\\e[2m';;
+		normal) printf '\\e[m'
+	esac
+	shift
+	[ -n "$1" ] && "$@";
+}
+
+## :slant Sets slant of text:
+#     italic
+#     normal
+function :slant {
+	case "$1" in
+		italic) printf '\\e[3m';;
+		normal) printf '\\e[m'
+	esac
+	shift
+	[ -n "$1" ] && "$@";
+}
+function :underline {
+	case "$1" in
+		t) printf '\\e[4m';;
+		nil) printf '\\e[m'
+	esac
+	shift
+	[ -n "$1" ] && "$@";
+}
+function :reset {
+	printf '\\e[m'
+	[ -n "$1" ] && "$@";
+}
+
+
+function has-array-item {
+	local -n source="$1" 
+	local target="$2"
+	local _has=no
+	for idx in "${!source[@]}"; {
+		[ "${source[idx]}" = "${target}" ] && _has=yes && return 0
+	}
+	return 1
+}
+
+
+
+
+function __bxcommon-about {
+	echo "version: ${bxcommon_version}"
+	declare -F
+}
+function bxcommon-check {
+	true
+}
+
+## list-directory
+# Basically like ls command 
+function list-directory {
+	((options[display-dotfiles]==1)) && shopt -s dotglob
+	((options[display-dotfiles]==0)) && shopt -u dotglob
+	printf '..\n'
+	printf '%s\n' *
+}
+
+## base-name
+# Basically equivalent to the "'basename'" coreutil		
+function base-name {
+	for file in "$@"; {
+		file="${file%/}"
+		printf '%s\n' "${file##*/}"
+	}
+}
+function dir-name {
+	for file in "$@"; do
+		# Usage: dirname "path"
+		tmp=${file:-.}
+		
+		tmp=${tmp%%"${tmp##*[!/]}"}
+		
+		[[ ${tmp##*/*} ]] && tmp=.
+		
+		tmp=${tmp%/*}
+		tmp=${tmp%%"${tmp##*[!/]}"}
+		
+		printf '%s\n' "${tmp:-/}"
+done
+}
+## current-time
+# Basically like coreutil "'date'"
+function current-time { printf "%($1)T\\n"; }
+function current-time.epoch { printf "%(%s)T\\n"; }
+
+# function ext {
+# 	declare -ng __ext_name="$1"
+# 	declare -g __ext_num="$2"
+# 	declare -g __ext_id=0
+
+# 	[ -z "$2" ] && {
+# 		__ext_name+=('')
+# 		__ext_num='-1'
+# 	}
+
+# 	function , {
+# 		if ((__ext_id==0)); then
+# 			__ext_name[-1]+="$*"
+# 			__ext_id=1
+# 		else
+# 			__ext_name[-1]+=" $*"
+# 		fi
+# 	}
+# }
+
+function block {
+	[ "$2" = '{' ] || exit 1
+	declare -ng __ext_name="$1"
+	declare -g __ext_id=0
+	declare -ag __ext_type
+	__ext_type[0]='none'
+	__ext_type[1]='newline'
+	set +e
+#	PATHbak="$PATH"
+#	PATH=''
+#	trap 'eval "+ $BASH_COMMAND"' ERR
+
+	function + {
+		case "${__ext_type[-1]}" in
+			'newline') __data-new "$1";;
+			'oneline') __data-add "$1";;
+			*) : ;;
+		esac
+	}
+	
+	function line {
+		__ext_id=0
+		__ext_num='-1'
+		__ext_name+=('')
+		__ext_type+=('oneline')
+	}
+	
+	function __data-add {
+		if ((__ext_id==0)); then
+			__ext_name[-1]+="$*"
+			__ext_id=1
+		else
+			__ext_name[-1]+=" $*"
+		fi
+	}
+	function __data-new {
+		__ext_name+=("$*")
+	}
+	function }, {
+		unset '__ext_type[-1]'
+#		[ ! "${__ext_type[-1]}" = 'none' ] && {
+#			PATH="$PATHbak"
+#		}
+	}
+}
+
+:
+
+get:cursor() {
+    IFS='[;' read -p $'\e[6n' -d R -rs _ y x _
+    printf '%s\n' "$y $x"
+}
+
+function output {
+	[ -z "${output}" ] && output='echo -E'
+	case  "${output:0:5}" in
+		'echo '|'echo')
+			local flags="${output: 5}"
+			echo "${flags:--E}" "$@"
+			return;;
+		*)
+			local -n target="${output}"
+			target="$@"
+			;;
+	esac
+}
+
+#############################################################################################LAYER II
+function bx:common:II {
+function bx:common:II:grep {
+	PATTERN="$1"
+	shift
+	IFS=$'\n'
+	INPUT=-
+	exec 3<&0
+	while read -ru 3 line; do
+		[[ "$line" =~ .*$PATTERN.* ]] && echo -E "$line"
+	done
+}
+function bx:common:II:count-lines {
+	local -a i
+	mapfile -t i
+	output "${#i[@]}"
+}
+}
+
+
+#!/bin/bash
+bxlegacy_version="0.11.8"
+bxlegacy_support=(
+	"C ${buffermaker_version}"
+	"E 0.11.7 Ex"
+)
+### versioning scheme:
+# ver Ha -> development version (alpha)
+# ver Ex -> test version (beta)
+# ver Q -> quality control (release candidate)
+# ver Re -> release version
+
+# ver type U -> unified version (single library)
+
+### version specific fixes ###
+function fix-0.11.7-Ex {
+	function linenum.begin {
+		# Get length of line-number of lines
+		bf_d[length]="${#buffer[@]}"
+		((bf_d[length]==0)) &&((bf_d[length]++))
+		
+		bf_d[number-length]=${#bf_d[length]}
+		bf_d[number-space]=1
+	}
+	function linenum.loop-begin {
+		space=1
+		ln="\e[%dG%b%*s"
+		lnargs=(
+			"${bf_d[loc-x]}"
+			"${faces[line-number]}"
+			"${bf_d[number-length]}"
+			"$i"
+		)
+		((i == bf_d[line])) && lnargs[1]="${faces[line-number-current-line]}"
+	}
+	function linenum.update {
+		printf '\e[%s;%sH%b%*s\e[m'\
+			   $((last_line + options[menu-line] - bf_d[base] + bf_d[loc-y]))\
+			   "${bf_d[loc-x]}"\
+			   "${faces[line-number]}"\
+			   ${bf_d[number-length]}\
+			   $last_line
+		printf '\e[%s;%sH%b%*s\e[m'\
+			   $y\
+			   "${bf_d[loc-x]}"\
+			   "${faces[line-number-current-line]}"\
+			   ${bf_d[number-length]}\
+			   ${bf_d[line]}
+	}
+
+	function set-linenum {
+		bf_h[redraw.content begin]=linenum.begin
+		bf_h[redraw.content loop-begin]=linenum.loop-begin
+		bf_h[redraw.cursor pre-redraw]=linenum.update
+	}
+	function unset-linenum {
+		bf_h[redraw.content begin]=''
+		bf_h[redraw.content loop-begin]=''
+		bf_h[redraw.cursor pre-redraw]=''
+	}
+
+	function redraw.content {
+		printf '\e[?25l'
+		
+		# the first line should be always empty 
+		unset buffer[0]
+
+		((bf_d[number-length]=0, bf_d[number-space]=0))
+		
+		@hook begin
+		
+		# Move the buffer horizontally if needed
+		((bf_d[column] +3 < bf_d[size-x] - bf_d[number-length] - 1)) &&
+			bf_d[basecolumn]=0
+		((bf_d[column] +3 > bf_d[size-x] - bf_d[number-length] - 1)) &&
+			bf_d[basecolumn]=$((bf_d[column] - (bf_d[size-x] + bf_d[loc-x] - bf_d[number-length] - 1) +3))
+
+		printf "\e[%s;%sH" "${bf_d[loc-y]}" "${bf_d[loc-x]}"
+		
+		# IFS has to be empty in order to bufferarray multiarray be printed as words instead of chars
+		IFS=''
+
+		# Handle line number displaying
+		# the resulting line has to be printed in one go to prevent flicker
+		# space stores if the position of actuall text should be offset by +1
+		# ln stores printf print line
+		# args stores printf arguments
+		local -i space
+		local ln
+		local -a lnargs
+		
+		# Iterate over shown lines
+		local -i max=$((bf_d[size-y]))
+		
+		for ((i = bf_d[base]; i - bf_d[base] < max; i++)); do
+			# if the line is last, do not add newline
+
+			ln="\e[%dG"
+			lnargs=(
+				"${bf_d[loc-x]}"
+			)
+			@hook loop-begin
+			
+			((i - bf_d[base] > max - 2)) && nlchar='' || nlchar='\n'
+
+			((i > ${#buffer[@]})) &&
+				printf '%b\e[%d;%dH%*s'\
+					   "${faces[${bf_d[background]:-default}]}"\
+					   $((bf_d[loc-y]+i-1))\
+					   "${bf_d[loc-x]}"\
+					   $((bf_d[size-x] - bf_d[number-length]))\
+					   ''\
+					&& continue
+			
+			# to improve speed syntaxing has to be "lazy" -- having to be heavily cached as ram is far less expensive to waste
+			[ -z "${bf_s[base+i]}" ] && {
+				make-render-line $((base + i))
+			}
+			local -n linearray="${bf_s[i]}"
+			
+			# due to escape codes present in bf_s,
+			# the bf_s has to be multidimensional nonsense for perfomance reasons
+			printf "${ln}%b%*s\e[%sG%b%s\e[m%b"\
+				   ${lnargs[@]}\
+				   "${faces[${bf_d[background]:-default}]}"\
+				   $((bf_d[size-x] - bf_d[number-length]))\
+				   ''\
+				   $((bf_d[loc-x] + bf_d[number-length] + space))\
+				   "${faces[${bf_d[background]:-default}]}"\
+				   "${linearray[*]:bf_d[basecolumn]:bf_d[size-x] - (bf_d[number-length])}"\
+				   "$nlchar"
+		done
+
+		@ifs
+		# redraw menu if open
+		[ "${bf_d[mode]}" = 'menu' ] && redraw.menu
+	}
+}
+
+#!/bin/bash
+bxinput_version="2025-04-08 Ex"
+## bxinput
+# universal bash event loop and input handler
+
+#many of these redundant, TODO: fix
+shopt -s lastpipe # For syntax highlighting
+#shopt -s extglob # Ensure advanced pattern matching is available
+shopt -s checkwinsize && (:;:) # Enable and then trigger a terminal size refresh
+
+[ -z "${DEFIFS}" ] && declare -r DEFIFS="$IFS"
+declare -A highlight faces faces_raw options charmap hooks resources
+declare -A keys_global
+declare -a k_hex buffers_l modes=('keys_global')
+declare -i ismenu comment current_count
+declare reset readin
+
+
+function load-default-config {					  
+	options=(
+#		[mouse]=0
+		[esc-to-meta]=0
+	)
+	add-mode empty
+		mode-options
+			:: else :
+			:: disable-global 1
+}
+
+
+## add-mode
+# Adds keybing mode
+function add-mode {
+	_last_keys="$1"
+	_last_add='add-mode'
+	modes+=("keys_$1")
+	declare -Ag "keys_$1"
+	declare -Ag "key_options_$1"
+}
+## define-mode-option
+# Sets option of mode '$1'
+function define-mode-option {
+	local -n ko="key_options_$1"
+	ko["$2"]="$3"
+}
+
+## local-set-mode-option See define-mode-option
+function local-set-mode-option { define-mode-option "$_last_keys" "$@"; }
+
+## mode-options Brings mode-options of lastly defined mode into \"focus\"
+function mode-options { _last_add="mode-options"; }
+
+
+## local-set-key
+# Sets keybinding of lastly defined mode
+# See define-key for details
+function local-set-key { define-key "$_last_keys" "$@"; }
+
+## global-set-key
+# Sets keybinding of global mode
+# See define-key for details
+function global-set-key { define-key global "$@"; }
+
+
+## kbd Converts Emacs like key notation into hex.
+function kbd {
+	local -i i=0 ch=0
+	local in out
+	# Surely there is better solution...
+	case "${1:0:2}" in
+		M-) in="${1:2:1}";;
+		*) in="$1"
+	esac
+	echo "$in" | {
+		while read -rsn1; do
+			out+="$(printf "%x\n" "'${in:$i}") "
+			((i++))
+		done
+	}
+	out=${out::-1}
+	printf '%s' "${out}"
+}
+
+## define-key defines keybinding
+#     '$1' can be either:
+#     '[function-key]'
+#     '[arrow-key]'
+#     '[prior | next]'
+#     'RET'
+#     'DEL'
+#     '[delechar]'
+#     'hex code ending with 0'
+function define-key {
+	local -n keys="keys_$1"
+	case "$2" in
+		#control
+		C-a) keys[1 0]="$3" ;; C-b) keys[2 0]="$3" ;;
+		C-c) keys[3 0]="$3" ;; C-d) keys[4 0]="$3" ;;
+		C-e) keys[5 0]="$3" ;; C-f) keys[6 0]="$3" ;;
+		C-g) keys[7 0]="$3" ;; C-h) keys[8 0]="$3" ;;
+		C-i) keys[9 0]="$3" ;; C-j) keys[a 0]="$3" ;;
+		C-k) keys[b 0]="$3" ;; C-l) keys[c 0]="$3" ;;
+		C-m) keys[d 0]="$3" ;; C-n) keys[e 0]="$3" ;;
+		C-o) keys[f 0]="$3" ;; C-p) keys[10 0]="$3";;
+		C-q) keys[11 0]="$3";; C-r) keys[12 0]="$3";;
+		C-s) keys[13 0]="$3";; C-t) keys[14 0]="$3";;
+		C-u) keys[15 0]="$3";; C-v) keys[16 0]="$3";;
+		C-w) keys[17 0]="$3";; C-x) keys[18 0]="$3";;
+		C-y) keys[19 0]="$3";; C-z) keys[1a 0]="$3";;
+		#function keys
+		'[f1]') keys[1b 4f 50 0]="$3";;
+		'[f2]') keys[1b 4f 51 0]="$3";;
+		'[f3]') keys[1b 4f 52 0]="$3";;
+		'[f4]') keys[1b 4f 53 0]="$3";;
+		'[f5]')  keys[1b 5b 31 35 7e 0]="$3";;
+		'[f6]')  keys[1b 5b 31 37 7e 0]="$3";;
+		'[f7]')  keys[1b 5b 31 38 7e 0]="$3";;
+		'[f8]')  keys[1b 5b 32 39 7e 0]="$3";;
+		'[f9]')  keys[1b 5b 32 30 7e 0]="$3";;
+		'[f10]') keys[1b 5b 32 31 7e 0]="$3";;
+		'[f11]') keys[1b 5b 32 33 7e 0]="$3";;
+		'[f12]') keys[1b 5b 32 34 7e 0]="$3";;
+		#arrow keys
+		'[left]')  keys[1b 5b 44 0]="$3";;
+		'[up]')    keys[1b 5b 41 0]="$3";;
+		'[right]') keys[1b 5b 43 0]="$3";;
+		'[down]')  keys[1b 5b 42 0]="$3";;
+		#pg up & down
+		'[prior]') keys[1b 5b 36 7e 0]="$3";;
+		'[next]')  keys[1b 5b 35 7e 0]="$3";;
+		#return
+		'RET') keys[a 0]="$3";;
+		#space
+		'SPC') keys[20 0]="$3";;
+		#backspace & delete
+		'DEL') keys[7f 0]="$3";;
+		'[deletechar]') keys[1b 5b 33 7e 0]="$3";;
+		'ESC') keys[1b 0 0]="$3";;
+		#scroll
+		'[wheel-up]')  keys[1b 4f 41 0]="$3";;
+		'[wheel-down]')  keys[1b 4f 42 0]="$3";;
+
+		*) keys["$2"]="$3"
+	esac
+}
+
+## keypress.mouse
+# Handle mouse click
+# function keypress.mouse {
+# 	local -i x y
+# 	#parse mouse stuff somewhatish weirdly
+# 	[ "${k_hex[*]:0:5}" = '1b 5b 3c 36 34' ] && previous-line && return
+# 	[ "${k_hex[*]:0:5}" = '1b 5b 3c 36 35' ] && next-line && return
+# 	[ "${k_hex[*]:0:5}" = '1b 5b 3c 38 30' ] && previous-line 9 && return
+# 	[ "${k_hex[*]:0:5}" = '1b 5b 3c 38 31' ] && next-line 9 && return
+# 	((skipnext==1)) && skipnext=0 && return
+# 	((skipnext==0)) && [ "${k_hex[*]:0:2}" = '1b 5b' ] && {
+# 		mapfile -t -d '' inputarray <<< "${1}"
+# 		inputarray[-1]="${inputarray[-1]%?}"
+# 		[ -z "${inputarray[2]}" ] && skipnext=1
+# 		mapfile -t -d ';' inputarray <<< "${inputarray[1]}"
+# 		inputarray[-1]="${inputarray[-1]%?}"	
+# 		mousemode="${inputarray[0]}"
+# 		x="${inputarray[1]}"
+# 		y="${inputarray[2]::-1}"
+# 		#limitations of movenment
+# 		#TODO:
+# 		((x < (bf_d[number-length] + bf_d[loc-x] + 2))) && {
+# 			if [ "$mousemode" = '[<0' ]; then
+# 				bf_d[line]=$(( bf_d[base] + (y - bf_d[loc-y]) ))
+# 				redraw
+# 			elif [ "$mousemode" = '[<2' ]; then #VERY BAD SOLUTION, TODO: FIX
+# 				clear-screen
+# 				echo 'Enter the index: '
+# 				read -re line
+# 				redraw
+# 			fi
+# 			return
+# 		}
+# 		bf_d[line]=$(( bf_d[base] + ( y - bf_d[loc-y] - 1) ))
+# 		bf_d[column]=$(( x - (bf_d[loc-x] + bf_d[number-length] + 1) ))
+# 		((bf_d[line] > ${#bf_e[@]})) &&
+# 			bf_d[line]=${#bf_e[@]}
+# 		((bf_d[column] > ${#bf_e[bf_d[line]]})) &&
+# 			bf_d[column]=${#bf_e[bf_d[line]]}
+# 		redraw
+# 	}
+# }
+
+## keypress Handles input
+# Either \$1 raw character input or k_hex array containing hex values of characters is used
+function keypress {
+	#arg $1 is the pressed key in normal text form
+	#k_hex is pressed key in hex array ending with 0
+		
+	local -i mode_contains=0
+	local -n modekeys="keys_${bf_d[mode]}"\
+	         key_options="key_options_${bf_d[mode]}"
+
+	# global keys
+	((key_options[disable-global])) ||
+		for str in "${!keys_global[@]}"
+		{
+			[ "$str" = "${k_hex[*]}" ] && {
+				"${keys_global[$str]}"
+				return
+			}
+		}
+
+	# Execute the 'always' key option
+	((${#key_options[@]})) &&
+		[ -n "${key_options[always]}" ] && "${key_options[always]}"
+
+	# Loop over current mode keybindings to match current keypress
+	for str in "${!modekeys[@]}"
+	{
+		[ "$str" = "${k_hex[*]}" ] && {
+			"${modekeys[$str]}"
+			mode_contains=1
+		}
+	}
+
+	# If mode keybinding doesn't contain current keypress, execute this
+	((${#key_options[@]})) &&
+		((mode_contains == 0)) &&
+		[ -n "${key_options[else]}" ] && {
+			[ "${key_options[else]}" = 'insert' ] || {
+				"${key_options[else]}" && return
+			}
+		}
+
+	# Do not continue if mode contains keypress to prevent control chars flooding file
+	((mode_contains==1)) && return
+
+	# If mouse is enabled, do whatever the hell that ugly piece of code does
+#	(("${options[mouse]}"==1)) && {
+#		keypress.mouse "$1"
+#		return
+#	}
+
+	# Insert the pressed character
+	[[ $1 =~ [[:cntrl:]] ]] && return # If char is control char, return
+	insert-word "$1"
+}
+
+function init-var {
+	if ((options[esc-to-meta])); then
+		esc_timeout=123456789 # a very big number
+	else
+		esc_timeout=0.01
+	fi
+#	((options[mouse])) && echo -ne "\e[?1000;1006;1015h" #enable mouse tracking
+}
+
+
+## main Main keyboard loop
+function input-loop {
+	while :; do
+		local -a k=()
+		local -i i=1
+		k_hex=() # Also convert the input sequence into hex for way easier handling
+		# Check for ready input
+		read -rsN1 k[0] && {
+			k_hex[0]="$(printf "%x\n" "'${k[0]}")"
+
+			# Hack to try preventing arrow codes being split into multiple and inserting garbage to buffer
+			[ "${k_hex[0]}" = '1b' ] && {
+				read -rsN1 -t "${esc_timeout}" k[1]
+				k_hex[1]="$(printf "%x\n" "'${k[1]}")"
+				[ "${k_hex[1]}" = '5b' ] && {
+					read -rsN1 k[2]
+					k_hex[2]="$(printf "%x\n" "'${k[2]}")"
+					case "${k_hex[2]}" in
+						'41'|'42'|'43'|'44')
+							k_hex[3]='0'
+							keypress "${k[@]}"
+							continue
+					esac
+					i=2
+				}
+				((i++))
+			}
+			# Multibyte hack
+			while read -rsN1 -t0.0001 k[$i]; do
+				k_hex[$i]="$(printf "%x\n" "'${k[$i]}")"
+				((i++))
+			done
+			k_hex[$i]='0'
+			keypress "${k[@]}" # Handle keypress event
+		}
+	done
+}
+
+#!/bin/bash
+bxrender_version="0.11.8"
+##############################################################################################RENDER
+# invalidate redraw cache for entire buffer
+function refresh {
+	clear-screen
+	bf_s=''
+	redraw
+}
+function mark-render-area {
+	for ((i=${1}; i<${2} ; i++)); do
+		unset bf_s[i]
+	done
+}
+function make-render-area { mark-render-area "$@"; }
+
+## make-render-line
+# Syntax highlights single line '$1'
+# Defaults to currently selected line if no argument is passed
+function make-render-line {
+	local -i line=${1:-bf_d[line]}
+	local -n linearray="${current_buffer}_syntax${line}"
+	bf_s[line]="${current_buffer}_syntax${line}"
+	linearray=()
+	
+	local -i comment=0 skip_next_space=0
+	local word=''
+	bf_e[line]=''
+	for _link in ${bf_c[line]}; do unset "$_link"; done; unset bf_c[line] # clear command buffer
+	column=0
+	
+	bckeIFS="${IFS}"
+	IFS=''
+	case "${bf_d[bxrender-function]}" in
+		'syntax1')
+			case "${bf_d[render-type]}" in
+				'per-char') make-render-line-loop-char;;
+				'per-word') make-render-line-loop-word;;
+				'per-line') make-render-line-loop-line;;
+				*) make-render-line-loop-char
+			esac;;
+		*)
+			"${bf_d[bxrender-function]}";;
+	esac
+	IFS="$bckeIFS"
+}
+function make-render-line-loop-line {
+	IFS=' '
+	while read -rs word; do
+		IFS=''
+		syntax-word
+		IFS=' '
+	done  <<< "${buffer[line]}"
+}
+
+function make-render-line-loop-word {
+	IFS=' '
+	newline=1
+	while read -rs -d' ' word; do
+		IFS=''
+		syntax-word
+		newline=0
+		((skip_next_space==1)) && skip_next_space=0 && continue
+		bf_e[line]+='s'
+	    linearray+=("${faces_raw[reset]}${faces_raw[${facename:-${bf_d[background]:-default}}]} ")
+		((column++))
+		
+		IFS=' '
+	done  <<< "${buffer[line]}"
+}
+
+
+## make-render-line-loop
+# Also creates bf_e charmap for movenment
+#     "Tab is 't'"
+#     "Space is 's'"
+#     "Any unmaped char is '0'"
+function make-render-line-loop-char {
+	while read -rsn1 char; do
+		[ "$char" = ' ' ] && {
+			syntax-word
+			word=''
+			((skip_next_space==1)) && skip_next_space=0 && continue
+			bf_e[line]+=s
+			linearray+=(
+				"${faces_raw[reset]}${faces_raw[${facename:-${bf_d[background]:-default}}]} "
+			)
+			((column++))
+			continue
+		}
+		[ "$char" = '	' ] && {
+			syntax-word
+			word=''
+			printf -v _bxrd__z '%*s' "${#resources[tab]}" ''
+			bf_e[line]+="${_bxrd__z// /t}"
+			face-no-expand tab-face #"${resources[tab]}"
+			((column+=${#resources[tab]}))
+			continue
+		}
+		[ "$char" = '' ] && {
+			syntax-word
+			word=''
+			skip_next_space=0
+			face-no-expand "${bf_d[background]:-default}" ''
+			newline=1 # tell syntax functions that the previous char was newline
+			return
+		}
+		word+="${char}"
+	done  <<< "${buffer[line]}"
+}
+
+## syntax-word
+# Decides what a word should highlighted as
+function syntax-word {
+	"${bf_d[syntax]}"
+	((bf_d[syntax-exec])) || face "$syntax_face" "$word" # s_ex controls syntax extended
+}
+
+## face
+# Add highlighted word to multidimensional nonsense "'bf_s'" arry
+function face {
+	[[ "$2" =~ ${2//?/(.)} ]]
+	linearray+=("${faces_raw[reset]}${faces_raw[${1}]}${BASH_REMATCH[@]:1}")
+	printf -v _bxrd__z '%*s' "${#2}" ''
+    bf_e[line]+="${_bxrd__z// /0}"
+}
+## face-no-expand
+# Add highlighted word to multidimensional nonsense "'bf_s'" arry without adding anything to bf_e[] array
+function face-no-expand {
+	[[ "$2" =~ ${2//?/(.)} ]]
+	linearray+=("${faces_raw[reset]}${faces_raw[${1}]}${BASH_REMATCH[@]:1}")
+}
+
+## set-face Sets face for syntax highlighting
+function set-face { syntax_face="${1}"; }
+
+# reset buffer rendered caches
+function clear-render {
+	bf_e=()
+	for l in "${bf_s[@]}"; { unset "$l"; }; bf_s=()
+	for l in "${bf_c[@]}"; { unset "$l"; }; bf_c=()
+}
+function syntax-none { set-face "${bf_d[background]:-default}"; }
+##############################################################################################REDRAW
+# Redraw popup menu
+function redraw.menu {
+	local -i y=${bf_d[menu_y]:-$((bf_d[line] + bf_d[loc-y] -1))}
+	local -i x=${bf_d[menu_x]:-$((bf_d[column] + bf_d[loc-x] -1))}
+	printf '\e[?25l' # hide cursor (again)
+	printf '\e[%s;0H' $y #$menuloc_y
+	for i in "${!menu_0[@]}"; {
+		if ((i == menuselection)); then
+			printf "\e[%sC%b%s${reset}\n" $x "${faces[menu-selected]}${faces_raw[${menu_2[i]:-menu-selected}]}" "${menu_0[i]}"
+		else
+			printf "\e[%sC%b%s${reset}\n" $x "${faces[menu-enabled]}${faces_raw[${menu_2[i]:-menu-enabled}]}" "${menu_0[i]}"
+		fi
+	}
+}
+
+function redraw {
+	@hook begin && return
+	redraw.content
+	redraw.cursor
+}
+
+function redraw.content {
+	printf '\e[?25l'
+	unset buffer[0]
+#	((bf_d[column] +3 < bf_d[size-x] - bf_d[number-length] - 1)) &&
+#		bf_d[basecolumn]=0
+#	((bf_d[column] +3 > bf_d[size-x] - bf_d[number-length] - 1)) &&
+#		bf_d[basecolumn]=$((bf_d[column] - (bf_d[size-x] + bf_d[loc-x] - bf_d[number-length] - 1) +3))
+	printf "\e[%s;%sH" "${bf_d[loc-y]}" "${bf_d[loc-x]}"
+	IFS='' #has to be empty in order to bufferarray multiarray be printed as words instead of chars
+	# Iterate over shown lines
+	local -i max=$((bf_d[size-y]))
+	for ((i = bf_d[base]; i - bf_d[base] < max; i++)); do
+		((i > ${#buffer[@]})) && {
+			printf '%b\e[%d;%dH%*s' "${faces[${bf_d[background]:-default}]}"\
+				   $((bf_d[loc-y]+i-1)) "${bf_d[loc-x]}"\
+				   $((bf_d[size-x] - bf_d[number-length])) '' &&
+				continue
+		}
+		# If the requested line isn't rendered, render it
+		[ -z "${bf_s[base+i]}" ] && make-render-line $((base + i))
+#		IFS='¸' # debug method
+		local -n linearray="${bf_s[i]}"
+		((i - bf_d[base] > max - 2)) && nlchar='' || nlchar='\n' #nlchar='\e[7m---More---\e[m'
+		printf "\e[%dG%b%*s\e[%sG%b%s\e[m%b"\
+			   "${bf_d[loc-x]}"\
+			   "${faces[${bf_d[background]:-default}]}"\
+			   ${bf_d[size-x]}\
+			   ''\
+			   ${bf_d[loc-x]}\
+			   "${faces[${bf_d[background]:-default}]}"\
+			   "${linearray[*]:bf_d[basecolumn]:bf_d[size-x] - (bf_d[number-length])}"\
+			   "$nlchar"
+	done
+
+	@ifs
+	# redraw menu if open
+	[ "${bf_d[mode]}" = 'menu' ] && redraw.menu
+}
+## print-buffer-line
+function print-buffer-line { # why this errors when stderr is redirected
+	IFS=''
+	local -n linearray="${bf_s[bf_d[line]]}"
+	printf '%s' "${linearray[*]:bf_d[basecolumn]:bf_d[size-x] - (bf_d[number-length])}"
+	@ifs
+}
+# Draw cursor on the line
+function redraw-line.cursor {
+	# redraw if buffer needs to be moved horizontally
+	((bf_d[column] > bf_d[size-x] - bf_d[number-length] - space)) && { redraw; return; }
+	((bf_d[basecolumn]==0)) || { redraw; return; }
+	printf '\e[%sG\e[?25h' $((
+	    bf_d[column] - bf_d[basecolumn] + bf_d[number-length] + bf_d[loc-x] + bf_d[number-space]
+    )) || redraw
+}	
+# Draw cursor and if move_base is 1 redraw
+function redraw.cursor {
+	@hook first && return
+	((move_base)) && {
+		move_base=0
+		redraw
+		return
+	}
+	local -i y=$((bf_d[line] + options[menu-line] - bf_d[base] + bf_d[loc-y]))
+	@hook pre-redraw
+	printf '\e[%s;%sH\e[?25h'\
+		   $y\
+		   $((bf_d[column] - bf_d[basecolumn] + bf_d[number-length] + bf_d[loc-x] + bf_d[number-space]))
+	last_line=${bf_d[line]}
+	@hook post-redraw
+}
+
+function cursor.hide { printf '\e[?25l'; }
+function cursor.show { printf '\e[?25h'; }
+
+#!/bin/bash
+bxformat_version="f2r4"
+
+function syntax-format {
+	((skip_word==1)) && {
+		skip_next_space=1
+		[ "$word" = '-->' ] && skip_word=0
+		return
+	}
+	[ "$word" = '<!--' ] && {
+		skip_next_space=1
+		skip_word=1
+		return
+	}
+	
+	((newline==1)) && {
+		bf_t[ichar]="${bf_t[indent_spaces]}"
+		bf_t[iexp]="${bf_t[indent_spaces_e]}"
+	}
+	((newline==0)) && {
+		bf_t[ichar]=
+		bf_t[iexp]=
+	}
+	((escape==2)) && {
+		escape=1
+		facename="$word"
+		skip_next_space=1
+		return
+	}
+	((escape==1)) && {
+		escape=0
+		[ -z "$word" ] && return
+		face "$facename" "${bf_t[ichar]}$word"
+		return
+	}
+	[ -z "$word" ] && return
+	[ "$word" = '<\>' ] && {
+		escape=1
+		skip_next_space=1
+		facename='unknown'
+		return
+	}
+	[ "$word" = '<[>' ] && {
+		escape=2
+		skip_next_space=1
+		return
+	}
+	((variable==1)) && {
+		variable=0
+		word="${!word}"
+	}
+	[ "$word" = '<v>' ] && {
+		variable=1
+		varname=
+		skip_next_space=1
+		return
+	}
+	
+	[ "$word" = '</u>' ] && {
+		upper=0
+		skip_next_space=1
+		return
+	}
+	[ "$word" = '<u>' ] && {
+		upper=1
+		skip_next_space=1
+		return
+	}
+	[ "$word" = '</f>' ] && {
+		unset linearray[-1]
+		bf_e[line]=${bf_e[line]::-1}
+		((column--))
+		unset facename
+		[ -n "$bckfacename" ] && {
+			facename="$bckfacename"
+			unset bckfacename
+		}
+		return
+	}
+	[ "$word" = '</f->' ] && {
+		unset linearray[-1]
+		bf_e[line]=${bf_e[line]::-1}
+		((column--))
+		skip_next_space=1
+		[ -n "$bckfacename" ] && {
+			facename="$bckfacename"
+			unset bckfacename
+		}
+		return
+	}
+	((facedef==1)) && {
+		skip_next_space=1
+		facedef=0
+		facename="$word"
+		return
+	}
+	case "$word" in
+		'<f>')
+			bckfacename="$facename"
+			skip_next_space=1
+			facedef=1
+			return;;
+		'<-f>')
+			unset linearray[-1]
+			bf_e[line]=${bf_e[line]::-1}
+			((column--))
+			bckfacename="$facename"
+			skip_next_space=1
+			facedef=1
+			return;;
+		
+		'</h>'|'</h3>')
+			unset linearray[-1]
+			bf_e[line]=${bf_e[line]::-1}
+			((column--))
+			unset facename
+			upper=0
+			[ -n "$bckfacename" ] && {
+				facename="$bckfacename"
+				unset bckfacename
+			}
+			return;;
+		'<h>'|'<h3>')
+			bckfacename="$facename"
+			skip_next_space=1
+			facename=title
+			upper=1
+			return;;
+		
+		'</b>'|'</strong>'|'</i>')
+			unset linearray[-1]
+			bf_e[line]=${bf_e[line]::-1}
+			((column--))
+			unset facename
+			[ -n "$bckfacename" ] && {
+				facename="$bckfacename"
+				unset bckfacename
+			}
+			return;;
+		
+		'<b>')
+			bckfacename="$facename"
+			skip_next_space=1
+			facename=title
+			return;;
+		'<i>')
+			bckfacename="$facename"
+			skip_next_space=1
+			facename=alt
+			return;;
+	
+		'<strong>')
+			bckfacename="$facename"
+			skip_next_space=1
+			facename=highlight
+			return;;
+	esac
+	
+	((sethighlight==2)) && {
+		sethighlight=1
+		skip_next_space=1
+		tmp_sex="$word"
+		return
+	}
+	((sethighlight==1)) && {
+		sethighlight=0
+		skip_next_space=1
+		bf_d[syntax-exec]="$tmp_sex"
+		bf_d[syntax]="syntax-$word"
+		return
+	}
+	[ "$word" = '<change-syntax>' ] && {
+		skip_next_space=1
+		sethighlight=2
+		return
+	}
+	[ "$word" = '<tab>' ] || [ "$word" = '<->' ] && {
+		skip_next_space=1
+		face-no-expand tab-face "${resources[tab]}"
+		for ((if=0; if< ${#resources[tab]}; if++)) {
+			bf_e[line]+='t'
+			((column++))
+		}
+		return
+	}
+	[ "$word" = '</indent>' ] && {
+		bf_t[indent_spaces]=
+		bf_t[indent_spaces_e]=
+		return
+	}
+	((bf_t[indent]==1)) && {
+		bf_t[indent]=0
+		skip_next_space=1
+		bf_t[indent_spaces]=
+		bf_t[indent_spaces_e]=
+		bf_t[indent_spaces_f]=tab
+		case "$word" in
+			'&tab')
+				bf_t[indent_spaces]="${resources[tab]}"
+				for ((if=0; if< ${#resources[tab]}; if++)) {
+					bf_t[indent_spaces_e]+='t'
+				}
+				return
+		esac
+		for ((if=0; if< word; if++)) {
+			bf_t[indent_spaces]+=' '
+			bf_t[indent_spaces_e]+='s'
+		}
+		return
+	}
+	[ "$word" = '<indent>' ] && {
+		bf_t[indent]=1
+		skip_next_space=1
+		return
+	}
+	((link==2)) && {
+		[ "$word" = ':' ] && {
+			((
+				skip_next_space=1,
+				link=1
+			))
+			return
+		}
+		skip_next_space=1
+		linkfn+="$word "
+		return
+	}
+	[ "$word" = '</a>' ] && {
+		((lc++))
+		((column--))
+		link=0
+		unset linearray[-1]
+		bf_e[line]=${bf_e[line]::-1}
+		bf_c[line]+="bf_c_${lc}_${current_buffer} "
+		declare -Ag "bf_c_${lc}_${current_buffer}"
+		local -n bf_c_line="bf_c_${lc}_${current_buffer}"
+		bf_c_line=(
+			[start]="$lsx"
+			[end]=$((column - 1))
+			[exec]="$linkfn"
+		)
+		return
+	}
+	[ "$word" = '<a>' ] && {
+		((
+			link=2,
+			lsx=column,
+			skip_next_space=1
+		))
+		linkfn=
+		return
+	}
+	((facelink==2)) && {
+		[ "$word" = ':' ] && {
+			((
+				skip_next_space=1,
+				facelink=1
+			))
+			facename='link'
+			return
+		}
+		skip_next_space=1
+		linkfn+="$word "
+		return
+	}
+	[ "$word" = '</link>' ] && {
+		((lc++))
+		((column--))
+		facelink=0
+		unset linearray[-1]
+		bf_e[line]=${bf_e[line]::-1}
+		bf_c[line]+="bf_c_${lc}_${current_buffer} "
+		declare -Ag "bf_c_${lc}_${current_buffer}"
+		local -n bf_c_line="bf_c_${lc}_${current_buffer}"
+		bf_c_line=(
+			[start]="$lsx"
+			[end]=$((column - 1))
+			[exec]="$linkfn"
+		)
+		unset facename
+		[ -n "$bckfacename" ] && {
+			facename="$bckfacename"
+			unset bckfacename
+		}
+		return
+	}
+	[ "$word" = '<link>' ] && {
+		((
+			facelink=2,
+			lsx=column,
+			skip_next_space=1
+		))
+		linkfn=
+		return
+	}
+	
+	((object==1)) && {
+		skip_next_space=1
+		[ "$word" = 'text:' ] && {
+			object=0
+			set_obj=0
+			return
+		}
+		case "$word" in
+			'select:') set_obj=1; obj_select=; return;;
+			'id:') set_obj=2; obj_id=; return;;
+			'left:') set_obj=3; obj_left=; return;;
+			'up:') set_obj=4; obj_up=; return;;
+			'right:') set_obj=5; obj_right=; return;;
+			'down:') set_obj=6; obj_down=; return;;
+		esac
+
+		((set_obj==1)) && obj_select+="$word "
+		((set_obj==2)) && obj_id+="$word "
+		((set_obj==3)) && obj_left+="$word "
+		((set_obj==4)) && obj_up+="$word "
+		((set_obj==5)) && obj_right+="$word "
+		((set_obj==6)) && obj_down+="$word "
+		return
+	}
+	case "$word" in
+		'</o>')
+			((lc++))
+			((column--))
+			link=0
+			unset linearray[-1]
+			bf_e[line]=${bf_e[line]::-1}
+			bf_c[line]+="bf_c_${lc}_${current_buffer} "
+			declare -Ag "bf_c_${lc}_${current_buffer}"
+			local -n bf_c_line="bf_c_${lc}_${current_buffer}"
+			bf_c_line=(
+				[start]="$lsx"
+				[end]=$((column - 1))
+				[exec]="$obj_select"
+				[id]="$obj_id"
+				[left]="$obj_left"
+				[up]="$obj_up"
+				[right]="$obj_right"
+				[down]="$obj_down"
+			)
+			return;;
+		'<o>')
+			((
+				object=1,
+				lsx=column,
+				skip_next_space=1
+			))
+			obj_id=
+			obj_text=
+			obj_select='true'
+			obj_left='backward-char'
+			obj_up='previous-line'
+			obj_right='forward-char'
+			obj_down='next-line'
+			set_obj=0
+			return;;
+	esac
+			
+	
+	((bf_t[checkbox]==1)) && {
+		bf_t[checkbox]=0
+		local -n state="$word"
+		[ -z "$state" ] && {
+			state=0
+		}
+		local display=
+		bckfacename="$facename"
+		case "$state" in
+			'1')
+				facename=checkbox-enabled
+				display="${resources[checkbox-enabled]}";;
+			*)
+				facename=checkbox-disabled
+				display="${resources[checkbox-disabled]}"
+		esac
+		((lc++))
+		((column--))
+		bf_c[line]+="bf_c_${lc}_${current_buffer} "
+		declare -Ag "bf_c_${lc}_${current_buffer}"
+		local -n bf_c_line="bf_c_${lc}_${current_buffer}"
+		bf_c_line=(
+			[start]=$((column))
+			[end]=$((column + ${#display}))
+			[exec]="toggle-checkbox $line $word"
+		)
+		word="${display}"
+	}
+	[ "$word" = '<ch>' ] && {
+		((
+			bf_t[checkbox]=1,
+			skip_next_space=1
+		))
+		return
+	}
+	[ "$word" = '</ch>' ] && {
+		unset linearray[-1]
+		bf_e[line]=${bf_e[line]::-1}
+		((column--))
+		unset facename
+		upper=0
+		[ -n "$bckfacename" ] && {
+			facename="$bckfacename"
+			unset bckfacename
+		}
+		return
+	}
+	[ "$word" = '</lbt>' ] && {
+		((lc++))
+		((column--))
+		link=0
+		unset linearray[-1]
+		bf_e[line]=${bf_e[line]::-1}
+		bf_c[line]+="bf_c_${lc}_${current_buffer} "
+		declare -Ag "bf_c_${lc}_${current_buffer}"
+		local -n bf_c_line="bf_c_${lc}_${current_buffer}"
+		bf_c_line=()
+
+		local -n ___sel=bf_t[lbt_${bf_t[lbt_id]}_obj_select]
+		local -n ___lef=bf_t[lbt_${bf_t[lbt_id]}_obj_left]
+		local -n ___upc=bf_t[lbt_${bf_t[lbt_id]}_obj_up]
+		local -n ___rig=bf_t[lbt_${bf_t[lbt_id]}_obj_right]
+		local -n ___dow=bf_t[lbt_${bf_t[lbt_id]}_obj_down]
+		bf_c_line+=(
+			[start]="$((lsx - 1))"
+			[end]=$((column + ${bf_t[lbt_${bf_t[lbt_id]}_w]} -1))
+			[exec]="${___sel}"
+			[id]="${bf_t[lbt_id]} " #important, space for object compatiblity TODO: make make sense
+			[left]="${___lef}"
+			[up]="${___upc}"
+			[right]="${___rig}"
+			[down]="${___dow}"
+		)
+		bf_c_line[beg-x]=$(((column +  ${bf_t[lbt_${bf_t[lbt_id]}_w]}/2) - (${#bf_t[lbt_${bf_t[lbt_id]}_text]}/2) ))
+		
+		case "${bf_t[lbt_${bf_t[lbt_id]}_la]}" in
+			'2')
+				bf_t[lbt]=0
+				bf_t[lbt_"${bf_t[lbt_id]}"_la]="3"
+
+				bf_c_line[beg-y]=$((line))
+				if (( ${bf_t[lbt_${bf_t[lbt_id]}_w]} % 2 == 0)); then
+					printf -v bf_t[mkl] '%*s' $((
+												   (${bf_t[lbt_${bf_t[lbt_id]}_w]}/2)
+												   +
+												   (${#bf_t[lbt_${bf_t[lbt_id]}_text]}/2)
+												   -1
+											   )) "${bf_t[lbt_${bf_t[lbt_id]}_text]}"
+					printf -v bf_t[mkl2] '%*s' $((
+													(${bf_t[lbt_${bf_t[lbt_id]}_w]}/2)
+													-
+													(${#bf_t[lbt_${bf_t[lbt_id]}_text]}/2)
+													-1
+												)) ''
+				else
+					printf -v bf_t[mkl] '%*s' $((
+												   (${bf_t[lbt_${bf_t[lbt_id]}_w]}/2)
+												   +
+												   (${#bf_t[lbt_${bf_t[lbt_id]}_text]}/2)
+												   
+											   )) "${bf_t[lbt_${bf_t[lbt_id]}_text]}"
+					printf -v bf_t[mkl2] '%*s' $((
+													(${bf_t[lbt_${bf_t[lbt_id]}_w]}/2)
+													-
+													(${#bf_t[lbt_${bf_t[lbt_id]}_text]}/2)
+													-1
+												)) ''
+				fi
+				word="${resources[bold-column]}${bf_t[mkl]}${bf_t[mkl2]}${resources[bold-column]}"
+				;;
+			'3')
+				bf_c_line[beg-y]=$((line-1))
+				bf_t[lbt]=0
+				bf_t[lbt_"${bf_t[lbt_id]}"_la]="0"
+				printf -v bf_t[mkl] '%*s' $((${bf_t[lbt_${bf_t[lbt_id]}_w]}-2)) ''
+				word="${resources[bold-angle-up-right]}${bf_t[mkl]// /${resources[bold-line]}}${resources[bold-angle-up-left]}"
+				;;
+			*)
+				bf_c_line[beg-y]=$((line+1))
+				bf_t[lbt]=0
+				bf_t[lbt_"${bf_t[lbt_id]}"_la]="2"
+				printf -v bf_t[mkl] '%*s' $((${bf_t[lbt_${bf_t[lbt_id]}_w]}-2)) ''
+				word="${resources[bold-angle-down-right]}${bf_t[mkl]// /${resources[bold-line]}}${resources[bold-angle-down-left]}"
+				;;
+		esac
+	}
+	
+	((bf_t[lbt]==1)) && {
+		skip_next_space=1
+		[ -z "$word" ] && return
+		case "${word}" in
+			'id:') bf_t[lbt_t]=1; return;;
+			'width:') bf_t[lbt_t]=2; return;;
+			'text:') bf_t[lbt_t]=3; return;;
+			
+			'select:') bf_t[lbt_t]=4; return;;
+			'left:') bf_t[lbt_t]=5; return;;
+			'up:') bf_t[lbt_t]=6; return;;
+			'right:') bf_t[lbt_t]=7; return;;
+			'down:') bf_t[lbt_t]=8; return;;
+		esac
+		
+		((bf_t[lbt_t]==1)) && {
+			bf_t[lbt_id]="${word}"
+		}
+		((bf_t[lbt_t]==2)) && {
+			bf_t[lbt_"${bf_t[lbt_id]}"_w]="${word}"
+		}
+		((bf_t[lbt_t]==3)) && {
+			bf_t[lbt_"${bf_t[lbt_id]}"_text]="${word}"
+			[ -z "${bf_t[lbt_${bf_t[lbt_id]}_w]}" ] && bf_t[lbt_"${bf_t[lbt_id]}"_w]=$((${#word}+8))
+		}
+		((bf_t[lbt_t]==4)) && { bf_t[lbt_"${bf_t[lbt_id]}"_obj_select]+="$word "; }
+		((bf_t[lbt_t]==5)) && { bf_t[lbt_"${bf_t[lbt_id]}"_obj_left]+="$word "; }
+		((bf_t[lbt_t]==6)) && { bf_t[lbt_"${bf_t[lbt_id]}"_obj_up]+="$word "; }
+		((bf_t[lbt_t]==7)) && { bf_t[lbt_"${bf_t[lbt_id]}"_obj_right]+="$word "; }
+		((bf_t[lbt_t]==8)) && { bf_t[lbt_"${bf_t[lbt_id]}"_obj_down]+="$word ";  }
+#		declare -p main_bf_t > d
+		return
+	}
+	[ "$word" = '<lbt>' ] && {
+		((
+			bf_t[lbt]=1,
+			lsx=column,
+			skip_next_space=1
+		))
+		return
+	}
+	
+	[ "$word" = '<lp>' ] && {
+		s+=('')
+		pad=3
+		skip_next_space=1
+		return
+	}
+	((pad==3)) && {
+		case "$word" in
+			'&s'|'&space'|'<s>') padchar=' ';;
+			'&'*) padchar="${resources[${word:1}]}";;
+			*) padchar="$word"
+		esac
+		pad=2
+		skip_next_space=1
+		return
+	}
+	((pad==2)) && {
+		expression="$word"
+		pad=1
+		return
+	}
+	[ "$word" = '</lp>' ] && {
+		unset linearray[-1]
+		bf_e[line]=${bf_e[line]::-1}
+		local -i x="${bf_d[size-x]}"
+		padnum=$(($expression))
+		for ((; padnum>0; padnum--)); do
+			face-no-expand "${facename:-${bf_d[background]:-default}}" "$padchar"
+			bf_e[line]+='s'
+		done						
+		pad=0
+		local wordspace=' '
+		for ((pli=0; pli<${#padlist[@]}; pli+=2)); do
+			((pli+2==${#padlist[@]})) && {
+				wordspace=''
+			}	
+			face "${padlist[pli]}" "${padlist[pli+1]}${wordspace}"
+		done
+		padlist=()
+		return
+	}
+
+	case "$word" in	
+		'<h1>'|'<h2>'|'<subh1>'|'<hhr>')
+			s+=('')
+			pad=1
+			skip_next_space=1
+			return;;
+		'</hhr>')
+			face-no-expand divider "${resources[line]}"
+			face-no-expand divider "${resources[bracket-open]}"
+			bf_e[line]+='ss'
+			pad=0
+			local wordspace=' '
+			for ((pli=0; pli<${#padlist[@]}; pli+=2)); do
+				((pli+2==${#padlist[@]})) && {
+					wordspace=''
+				}	
+				face title "${padlist[pli+1]^^}${wordspace}"
+			done
+			face-no-expand divider "${resources[bracket-close]}"
+			bf_e[line]+='s'
+			for ((padnum= bf_d[size-x] - s[-1] -2; padnum>0; padnum--)); do
+				face-no-expand divider "${resources[line]}"
+				bf_e[line]+='s'
+			done
+			padlist=()
+			return;;
+
+		'</subh1>')
+			for ((padnum= bf_d[size-x] / 2 - s[-1] / 2; padnum>0; padnum--)); do
+				face-no-expand "${facename:-${bf_d[background]:-default}}" " "
+				bf_e[line]+='s'
+			done						
+			pad=0
+			local wordspace=' '
+			for ((pli=0; pli<${#padlist[@]}; pli+=2)); do
+				((pli+2==${#padlist[@]})) && {
+					wordspace=''
+				}	
+				face "${facename:-unknown}" "${padlist[pli+1]}${wordspace}"
+			done
+			padlist=()
+			return;;
+		'</h1>')
+			for ((padnum= bf_d[size-x] / 2 - s[-1] / 2; padnum>0; padnum--)); do
+				face-no-expand divider "${resources[line]}"
+				bf_e[line]+='s'
+			done						
+			pad=0
+			local wordspace=' '
+			for ((pli=0; pli<${#padlist[@]}; pli+=2)); do
+				((pli+2==${#padlist[@]})) && {
+					wordspace=''
+				}	
+				face title "${padlist[pli+1]^^}${wordspace}"
+			done
+			for ((padnum= bf_d[size-x] / 2 - s[-1] / 2; padnum>0; padnum--)); do
+				face-no-expand divider "${resources[line]}"
+				bf_e[line]+='s'
+			done
+			padlist=()
+			return;;
+		'</h2>')
+			for ((padnum= bf_d[size-x] / 2 - s[-1] / 2; padnum>0; padnum--)); do
+				face-no-expand "${facename:-${bf_d[background]:-default}}" " "
+				bf_e[line]+='s'
+			done						
+			pad=0
+			local wordspace=' '
+			for ((pli=0; pli<${#padlist[@]}; pli+=2)); do
+				((pli+2==${#padlist[@]})) && {
+					wordspace=''
+				}	
+				face title "${padlist[pli+1]^^}${wordspace}"
+			done
+			padlist=()
+			return;;
+		'<>')
+			unset linearray[-1]
+			bf_e[line]=${bf_e[line]::-1}
+			skip_next_space=1
+			return;;
+		'<hr>')
+			for ((x=bf_d[size-x]; x>0; x--)); do
+				face-no-expand "${facename:-divider}" "${resources[line]}"
+				bf_e[line]+='s'
+			done
+			skip_next_space=1
+			return;;
+	esac
+	
+	((space_next==1)) && {
+		space_next=0
+		skip_next_space=1
+		for ((if=0; if< word; if++)) {
+			linearray+=(' ')
+			bf_e[line]+='s'
+			((column++))
+		}
+		return
+	}
+	case "$word" in
+		'<s>')
+			space_next=1
+			skip_next_space=1
+			return;;
+		'<ol>')
+			listcount=1
+			orderlist=1
+			skip_next_space=1
+			return;;
+		'</ol>')
+			listcount=0
+			orderlist=0
+			skip_next_space=1
+			return;;
+		'<li>')
+			((orderlist==1)) && {
+				word="${listcount}${resources[item-number]}"
+				((listcount++))
+			} || word="${resources[item]}"
+	esac
+	
+	[ "${word:0:1}" = '&' ] && {
+		[ "${word}" = '&' ] && word='&' || word="${resources[${word:1}]}"
+	}
+	
+	((newline==1)) && newline=0
+	((column+=${#bf_t[ichar]} + ${#word}))
+	((upper==1)) && {
+		word="${word^^}"
+	}
+	((pad==1)) && {
+		padlist+=(
+			"${facename:-unknown}" "${bf_t[ichar]}$word"
+		)
+		s[-1]=$((s[-1] + ${#word} + 1))
+		skip_next_space=1
+		return
+	}
+	[ -n "${bf_t[ichar]}" ] &&
+		face-no-expand "${bf_t[indent_spaces_f]:-tab}" "${bf_t[ichar]}"
+	bf_e[line]+="${bf_t[iexp]}"
+	face "${facename:-unknown}" "$word"
+}
+
+function link-enter {
+	for link in ${bf_c[bf_d[line]]}; {
+		local -n bf_c_line="$link"		
+		((bf_d[column] >= bf_c_line[start])) &&
+			((bf_d[column] <= bf_c_line[end])) && {
+				has=1
+				${bf_c_line[exec]}
+				return
+			}
+	}
+	${bf_d[format-else]}
+}
+
+function format-left {
+	for link in ${bf_c[bf_d[line]]}; {
+		local -n bf_c_line="$link"
+		((bf_d[column] >= bf_c_line[start])) &&
+			((bf_d[column] <= bf_c_line[end])) && {
+				${bf_c_line[left]:-backward-char}
+				return
+			}
+	}
+	backward-char
+}
+function format-up {
+	for link in ${bf_c[bf_d[line]]}; {
+		local -n bf_c_line="$link"
+		((bf_d[column] >= bf_c_line[start])) &&
+			((bf_d[column] <= bf_c_line[end])) && {
+				${bf_c_line[up]:-previous-line}
+				return
+			}
+	}
+	previous-line
+}
+function format-right {
+	for link in ${bf_c[bf_d[line]]}; {
+		local -n bf_c_line="$link"
+		((bf_d[column] >= bf_c_line[start])) &&
+			((bf_d[column] <= bf_c_line[end])) && {
+				${bf_c_line[right]:-forward-char}
+				return
+			}
+	}
+	forward-char
+}
+function format-down {
+	for link in ${bf_c[bf_d[line]]}; {
+		local -n bf_c_line="$link"
+		((bf_d[column] >= bf_c_line[start])) &&
+			((bf_d[column] <= bf_c_line[end])) && {
+				${bf_c_line[down]:-next-line}
+				return
+			}
+	}
+	next-line
+}
+
+function obj {
+	for y in "${!bf_c[@]}"; {
+		for obj in ${bf_c[y]}; {
+			local -n bf_c_line="$obj"
+			[ "${bf_c_line[id]}" = "$1 " ] && {
+				bf_d[line]="${bf_c_line[beg-y]:-${y}}"
+				bf_d[column]="${bf_c_line[beg-x]:-${bf_c_line[start]}}"
+				redraw.cursor
+				return
+			}
+		}
+	}
+}
+
+function toggle-checkbox {
+	local -n var="$2"
+	case "$var" in
+		0) var=1;;
+		*) var=0
+	esac
+	make-render-line "$1"
+	redraw
+}
+
+#!/bin/bash
+bxplatform_version='p0r2'
+### INCLUDED BUFFERS
+
+function about {
+	declare-buffer about
+	bf_d+=(
+		[mode]=basic
+		[syntax]=syntax-format
+		[syntax-exec]=1
+		[render-type]=per-char
+	)
+	declare -F | mapfile -t -d $'\n' functions
+	declare -f | mapfile -t -d $'\n' code
+	fnc="${#functions[@]}"
+	codec="${#code[@]}"
+	buffer=(
+		''
+		'<h1> About Buffermaker </h1>'
+		'<subh1> BashboX Text Buffer Maker  </subh1>'
+		'<f> green Buffer </f> <> <f> cyan Maker </f> <f> magenta is general purpose text user interface toolkit'
+		'written in <f> blue pure bash </f> <> . Welcome to its about buffer. </f>'
+		'<f> yellow'
+		'+------------+ LOGO TO BE CHANGED'
+		'|_B   \   \   \ THIS IS TEMPORARY PLACEHOLDER'
+		'|___u  \   \   \ IT WON'"'"'T BE THIS BAD'
+		'|_____f  \  \   \ ATLEAST I HOPE SO'
+		'|_______f \   \  \ WELP'
+		'|_________e \  \  \'
+		'+___________r\Maker\ </f>'
+		''
+		'<hhr> Actions </hhr>'
+		'<-> <f> white <lbt> id: quit select: die text: Exit </lbt> </f>'
+		'<-> <lbt> id: quit </lbt>'
+		'<-> <f> gray <lbt> id: quit </lbt> </f>'
+		
+#		'<o> id: quit select: die text: <f> button quit </f> </o>'
+		'<hhr> Debug info </hhr>'
+		'Buffermaker version: <f> hint <v> buffermaker_version </f>'
+		'BXcommon version: <f> hint <v> bxcommon_version </f>'
+		'BXinput version: <f> hint <v> bxinput_version </f>'
+		'BXrender version: <f> hint <v> bxrender_version </f>'
+#		'BXbuffer version: <f> hint <v> bxbuffer_version </f>'
+		'BXformat version: <f> hint <v> bxformat_version </f>'
+		'BXplatform version: <f> hint <v> bxplatform_version </f>'
+#		'BXlegacy version: <f> hint <v> bxlegacy_version </f> <> , Supporting:'
+#		'<s> 2 <f> hint C </f> <> urrent <> <f> dim / </f> <> <f> hint E </f> <> xplicit <> <f> dim / </f> <> <f> hint I </f> <> mplicit'
+	)
+#	for _bxpl__v in "${bxlegacy_support[@]}"; do
+#		buffer+=('<-> <li> '"${_bxpl__v}")
+#	done
+	buffer+=(
+#		'<s> 2 <f> red All legacy support is experimental and should not be depended upon! </f>'
+		'functions: <f> hint <v> fnc </f>'
+		'lines of code: <f> hint <v> codec </f>'
+		'Bash version: <f> hint <v> BASH_VERSION </f>'
+		'Terminal: <f> hint <v> TERM </f>'
+		'Terminal size: <f> hint <v> COLUMNS </f> <> x <> <f> hint <v> LINES </f>'
+		'Terminal color type: <f> hint <v> COLORTERM </f>'
+		'Colors: <[> black ▓▓▓ <> <[> red ▓▓▓ <> <[> green ▓▓▓ <> <[> yellow ▓▓▓ <> <[> blue ▓▓▓ <> <[> magenta ▓▓▓ <> <[> cyan ▓▓▓ <> <[> light-gray ▓▓▓ <[> default'
+		'        <[> gray ▓▓▓ <> <[> light-red ▓▓▓ <> <[> light-green ▓▓▓ <> <[> light-yellow ▓▓▓ <> <[> light-blue ▓▓▓ <> <[> light-magenta ▓▓▓ <> <[> light-cyan ▓▓▓ <> <[> white ▓▓▓ <[> default'
+		''
+		'<hhr> Legalities </hhr>'
+		'&copy <f> highlight Netkv </f> 2022-2025'
+		'Repo: <f> link https://github.com/netkv/BufferMaker </f>' 
+		''
+		'<h3> Licence </h3> <f> yellow (BSD-0) </f> <indent> &tab'
+		'<f> light-magenta Permission to use, copy, modify, and/or distribute this software for any purpose'
+		'with or without fee is hereby granted. </f>'
+		''
+		'<f> light-blue THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD'
+		'TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS.'
+		'IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT,'
+		'OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA'
+		'OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,'
+		'ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE. </indent> </f>'
+		''
+		'<hhr> Declared functions </hhr>'
+	)
+	##TODO: make overformat
+	if ((COLUMNS<80)); then
+		for ((idc=0;idc<"${#functions[@]}" ; idc+=1)); do
+			buffer+=("${functions[idc]:11}")
+		done
+	elif ((COLUMNS<120)); then
+		 for ((idc=0;idc<"${#functions[@]}" ; idc+=2)); do
+			 buffer+=("<lp> &space 0 ${functions[idc]:11} </lp> <lp> &space 40-s[-2] ${functions[idc+1]:11}  </lp>")
+		 done
+	elif ((COLUMNS<160)); then
+		 for ((idc=0;idc<"${#functions[@]}" ; idc+=3)); do
+			 buffer+=("<lp> &space 0 ${functions[idc]:11} </lp> <lp> &space 40-s[-2] ${functions[idc+1]:11}  </lp> <lp> &space 40-s[-2] ${functions[idc+2]:11}  </lp>")
+		 done
+	elif ((COLUMNS<200)); then
+		 for ((idc=0;idc<"${#functions[@]}" ; idc+=4)); do
+			 buffer+=("<lp> &space 0 ${functions[idc]:11} </lp> <lp> &space 40-s[-2] ${functions[idc+1]:11}  </lp> <lp> &space 40-s[-2] ${functions[idc+2]:11} </lp> <lp> &space 40-s[-2] ${functions[idc+3]:11}  </lp>")
+		 done
+	elif ((COLUMNS<240)); then
+		for ((idc=0;idc<"${#functions[@]}" ; idc+=5)); do
+			buffer+=("<lp> &space 0 ${functions[idc]:11} </lp> <lp> &space 40-s[-2] ${functions[idc+1]:11}  </lp> <lp> &space 40-s[-2] ${functions[idc+2]:11} </lp> <lp> &space 40-s[-2] ${functions[idc+3]:11}  </lp> <lp> &space 40-s[-2] ${functions[idc+4]:11}  </lp>")
+		done
+	else
+		for ((idc=0;idc<"${#functions[@]}" ; idc+=6)); do
+			buffer+=("<lp> &space 0 ${functions[idc]:11} </lp> <lp> &space 40-s[-2] ${functions[idc+1]:11}  </lp> <lp> &space 40-s[-2] ${functions[idc+2]:11} </lp> <lp> &space 40-s[-2] ${functions[idc+3]:11}  </lp> <lp> &space 40-s[-2] ${functions[idc+4]:11}  </lp> <lp> &space 40-s[-2] ${functions[idc+5]:11} </lp>")
+		done
+
+	fi
+	redraw
+	obj quit
+	input-loop
+}
+
+function box.shadow {
+	bf_d+=(
+		[size-y]=${size_y}
+		[loc-y]=${loc_y}
+		[size-x]=${size_x}
+		[loc-x]=${loc_x}
+	)
+
+	declare-buffer msgbox_background
+	bf_d+=(
+		[mode]=none
+		[syntax]=syntax-none
+		[syntax-exec]=0
+		[render-type]=per-line
+		[background]=border-highlight
+
+		[size-y]=$((size_y + 2))
+		[loc-y]=$((loc_y - 1))
+		[size-x]=$((size_x + 2))
+		[loc-x]=$((loc_x - 1))
+	)
+	redraw
+
+	declare-buffer msgbox_shadow
+	bf_d+=(
+		[mode]=none
+		[syntax]=syntax-none
+		[syntax-exec]=0
+		[render-type]=per-line
+		[background]=border-shadow
+
+		[size-y]=$((size_y + 1))
+		[loc-y]=$((loc_y))
+		[size-x]=$((size_x + 1))
+		[loc-x]=$((loc_x))
+	)
+	redraw
+}
+
+## msgbox
+# ${1} is the name of the buffer of msgbox
+# the ${<value of ${1}>_title} is title of msgbox 
+function msgbox {
+	local return_to="${current_buffer}"
+	local -n message="${1}"
+	local -n message_title="${1}_title"
+	declare-buffer msgbox
+	bf_d+=(
+		[mode]=basic
+		[syntax]=syntax-format
+		[syntax-exec]=1
+		[render-type]=per-char
+		[return-to]="${return_to}"
+	)
+	buffer=(
+		''
+		''
+		"<h2> ${message_title} </h2>"
+		''
+	)
+	append-array message buffer
+	buffer+=(
+		''
+		'<s> 14 <f> hint <Enter> </f> <o> id: ok select: box.close right: : left: : up: : down: : text: <f> button  Ok  </f> </o>'
+	)
+	
+	local size_y=$((${#buffer[@]}))
+	local loc_y=$((LINES / 2 - ( ${#buffer[@]} - 1 ) / 2 ))
+	local size_x=40
+	local loc_x=$((COLUMNS / 2 - 20))
+
+	box.shadow
+	
+	set-buffer msgbox
+	redraw
+	obj ok
+}
+
+function dialogbox {
+	local return_to="${current_buffer}"
+	local -n message="${1}"
+	local -n message_title="${1}_title"
+	declare-buffer dialogbox
+	bf_d+=(
+		[mode]=basic
+		[syntax]=syntax-format
+		[syntax-exec]=1
+		[render-type]=per-char
+		[return-to]="${return_to}"
+	)
+	buffer=(
+		''
+		''
+		"<h2> ${message_title} </h2>"
+		''
+	)
+	append-array message buffer
+	buffer+=('')
+	ext buffer
+	, '<s> 2'
+	, "<o> id: yes select: ${1}.yes right: obj no left: : up: : down: : text: <f> button  Yes  </f> </o>"
+	, "<o> id: no select: ${1}.no right: : left: obj yes up: : down: : text: <f> button  No  </f> </o>"
+	
+	local size_y=$((${#buffer[@]}))
+	local loc_y=$((LINES / 2 - ( ${#buffer[@]} - 1 ) / 2 ))
+	local size_x=40
+	local loc_x=$((COLUMNS / 2 - 20))
+		
+	bf_d+=(
+		[size-y]=${size_y}
+		[loc-y]=${loc_y}
+		[size-x]=${size_x}
+		[loc-x]=${loc_x}
+	)
+
+	box.shadow
+	
+	set-buffer dialogbox
+	redraw
+	obj no
+}
+
+function box.close {
+	set-buffer "${bf_d[return-to]}"
+	redraw
+}
+
+####################################################################################################
+# filepicker, usage: file-picker <dir> <function to be ran on its finish>
+# with $1 of that function  being the picked file
+function syntax:dired {
+	set-face default
+	[ -x "$word" ] && set-face exec
+	[ -d "$word" ] && set-face dir
+	[ -L "$word" ] && set-face symlink
+	[ -c "$word" ] && set-face char
+	[ -S "$word" ] && set-face socket
+	case "$word" in
+		*'.png'|*'.jpg') set-face image;;
+		*'.mp4'|*'.avi'|*.'mkv'|*'.m4v') set-face video;;
+		*'.mp3'|*'.ogg'|*.'wav') set-face audio;;
+		*'.zip'|*'.tar'|*'.rar') set-face archive;;
+		*'.txt'|*'.md') set-face text;;
+	esac
+}
+
+function dired:load-mode {
+	add-mode _bx_int__dired_mode
+	define-key _bx_int__dired_mode RET dired:select
+	define-key _bx_int__dired_mode "$(kbd h)" dired:toggle-hidden
+	define-key _bx_int__dired_mode C-c die
+	define-key _bx_int__dired_mode '[up]' previous-line
+	define-key _bx_int__dired_mode '[down]' next-line
+	mode-options
+	:: else :
+	load-theme filetype_faces
+}
+
+function dired:toggle-hidden {
+	((options[display-dotfiles]==0)) && options[display-dotfiles]=1 || options[display-dotfiles]=0
+	dired:load-dir
+	redraw
+}
+
+function dired:select {
+	[ -d "${buffer[bf_d[line]]}" ] && {
+		cd "${buffer[bf_d[line]]}"; dired:load-dir; redraw; return
+	}
+	"${_bx_int__return}" "${buffer[bf_d[line]]}"
+}
+function dired:load-dir {
+	buffer=()
+	bf_d+=([line]=1 [base]=1)
+	mapfile -t -O 1 buffer <<< "$(list-directory)"
+	clear-render
+	clear-screen
+}
+
+function file-picker {
+	local return_to="${current_buffer}"
+	declare -g _bx_int__return="${2}"
+	declare-buffer __bx_int__dired
+	bf_d+=(
+		[mode]=_bx_int__dired_mode
+		[syntax]=syntax:dired
+		[syntax-exec]=0
+		[render-type]=per-line
+		[line]=1
+		[column]=0
+		[return-to]="${return_to}"
+	)
+	dired:load-dir "${1}"
+	redraw
+}
+####################################################################################################
+
+
+default_faces=(
+	reset '\e[m'
+	default "$(:weight normal)"
+	border-highlight "$(:mode inverse)"
+	border-shadow "$(:mode inverse :foreground gray)"
+	menu "$(:background yellow :foreground black)"
+	menu-divider "$(:underline t)"
+	menu-highlight "$(:weight bold :underline t)"
+	menu-enabled "$(:background yellow :foreground black)"
+	menu-selected "$(:background light-yellow :foreground black :weight bold)"
+	checkbox-disabled "$(:foreground light-gray)"
+	checkbox-enabled "$(:foreground yellow :weight bold)"
+	action "$(:foreground light-blue)"
+	button "$(:mode inverse :underline t)"
+	link "$(:underline t :foreground light-blue)"
+	link-highlight "$(:weight bold :underline t :foreground light-blue)"
+	title "$(:weight bold)"
+	alt "$(:slant italic)"
+	highlight "\e[4m$(:weight bold)"
+	accent "$(:foreground yellow)"
+	background-highlight "$(:background black)"
+	dim "$(:weight dim)"
+	divider "$(:foreground gray)"
+	name "$(:foreground magenta)"
+	hint "$(:foreground light-yellow)"
+	hint-highlight "$(:underline t :foreground light-yellow :weight bold)"
+	line-number "$(:foreground gray)"
+	line-number-empty "$(:weight dim :foreground gray)"
+	line-number-current-line "$(:weight bold :foreground light-red)"
+	tab-face "$(:weight dim :foreground gray)"
+	region "$(:weight bold :background gray)"
+	minibuffer-prompt "$(:weight normal)"
+	#
+	TODO "$(:background magenta)"
+	NOTE "$(:background gray)"
+	# common colors for format stuff
+	black      '\e[30m' gray          '\e[90m'
+	red        '\e[31m' light-red     '\e[91m'
+	green      '\e[32m' light-green   '\e[92m'
+	yellow     '\e[33m' light-yellow  '\e[93m'
+	blue       '\e[34m' light-blue    '\e[94m'
+	magenta    '\e[35m' light-magenta '\e[95m'
+	cyan       '\e[36m' light-cyan    '\e[96m'
+	light-gray '\e[37m' white         '\e[97m'
+
+	bg-black      '\e[40m' bg-gray          '\e[100m'
+	bg-red        '\e[41m' bg-light-red     '\e[101m'
+	bg-green      '\e[42m' bg-light-green   '\e[102m'
+	bg-yellow     '\e[43m' bg-light-yellow  '\e[103m'
+	bg-blue       '\e[44m' bg-light-blue    '\e[104m'
+	bg-magenta    '\e[45m' bg-light-magenta '\e[105m'
+	bg-cyan       '\e[46m' bg-light-cyan    '\e[106m'
+	bg-light-gray '\e[47m' bg-white         '\e[107m'
+)
+resources=(
+	[&]='&'
+	[line]='─'
+	[bold-line]='━'
+	[column]='│'
+	[bold-column]='┃'
+	[angle-down-right]='┌'
+	[bold-angle-down-right]='┏'
+	[angle-down-left]='┐'
+	[bold-angle-down-left]='┓'
+	[angle-up-right]='└'
+	[bold-angle-up-right]='┗'
+	[angle-up-left]='┘'
+	[bold-angle-up-left]='┛'
+	[double-line]='═'
+	[double-column]='║'
+	[double-angle-down-right]='╔'
+	[double-angle-down-left]='╗'
+	[double-angle-up-right]='╚'
+	[double-angle-up-left]='╝'
+	[item]='*'
+	[item-number]='.'
+	[tab]='    '
+	[checkbox-disabled]='[ ]'
+	[checkbox-enabled]='[x]'
+	[bracket-open]='['
+	[bracket-close]=']'
+	[dot]='.'
+	
+	[dashed-line]='┄'
+	[bold-dashed-line]='┅'
+	[dashed-column]='┆'
+	[bold-dashed-column]='┇'
+	
+	[dotted-line]='┈'
+	[bold-dotted-line]='┉'
+	[dotted-column]='┊'
+	[bold-dotted-column]='┋'
+
+	[integral-open]='⌠'
+	[integral-close]='⌡'
+	
+	[buffermaker]="[BufferMaker ${buffermaker_version}]"
+	
+	[lt]='<'
+	[gt]='>'
+	[amp]='&'
+	[quot]='"'
+	[apos]=\'
+	[cent]='¢'
+	[pound]='£'
+	[yen]='¥'
+	[euro]='€'
+	[copy]='©'
+	[reg]='®'
+	[tm]='™'	
+)
+
+# specific common face sets, to be loaded when needed
+filetype_faces=(
+	dir "$(:weight bold :foreground blue :underline t)"
+	exec "$(:weight bold :foreground green)"
+	symlink "$(:weight bold :foreground cyan)"
+	unreadable "$(:foreground gray)"
+	char "$(:weight bold :background black :foreground yellow)"
+	socket "$(:weight bold :foreground magenta)"
+	image "$(:weight bold :foreground magenta)"
+	video "$(:weight bold :foreground light-magenta)"
+	audio "$(:foreground cyan)"
+	archive "$(:weight bold :foreground )"
+	text "$(:weight bold :foreground light-magenta)"
+)
+
+### deprecated functions ###
+## fn Shorthand for one line functions
+function fn {
+	[ -z "$*" ] && exit 1 # error if empty
+	local name="$1"
+	shift
+	eval "function $name { $@; }"
+}
+
+function load-default-config {
+	options=(
+		[mouse]=0
+		[todonote]=0
+		[line-number-mode]=0
+		[empty-line-char]=''
+		[tty-linuxfb]=1 # enable truecolor support for framebuffer
+		[esc-to-meta]=0
+	)
+	
+	add-mode empty
+		mode-options
+			:: else :
+			:: disable-global 1
+
+	add-mode menu
+		:: '[up]' menu.up
+		:: "$(kbd k)" menu.up
+		:: 'C-p' menu.up
+		:: '[down]' menu.down
+		:: "$(kbd j)" menu.down
+		:: 'C-n' menu.down
+		:: 'RET' menu.select
+		mode-options
+			:: else menu.exit
+			:: disable-global 1
+
+	add-mode basic
+		:: '[left]' format-left
+		:: '[wheel-up]' format-up
+		:: '[up]' format-up
+		:: '[right]' format-right
+		:: '[wheel-down]' format-down
+		:: '[down]' format-down
+		:: '[next]' scroll-down #pgdown
+		:: '[prior]' scroll-up #pgup
+		:: "$(kbd n)" scroll-left
+		:: "$(kbd m)" scroll-right
+		:: RET link-enter
+		:: C-c die
+		mode-options
+			:: else :
+
+	## Faces
+	#		Defined in escape codes
+	#		Helper functions:
+	#			:weight
+	#				normal
+	#				bold
+	#			:slant
+	#				normal
+	#				italic
+	#           :underline
+	#               t (enables)
+	#               nil (do nothing)
+	#			:background & :foreground
+	#				either hex. colour, colour name, or c<index> for 256 indexed colours
+	#		See extensions/gruvboxdark for another example
+	load-theme default_faces
+	dired:load-mode
+}
+
+## syntaxy sugar sugary syntax
+function @ifs { IFS="$DEFIFS"; }
+
+function ::
+case "$_last_add" in
+	add-menu) local-set-menu "$@";;
+	set-highlight) add-highlight "$@";;
+	global-set) global-set-key "$@";;
+	set-options) define-option "$@";;
+	add-mode) local-set-key "$@";;
+	mode-options) local-set-mode-option "$@";;
+	set-buffer) local-set-buffer-data "$@"
+esac
+
+## focus set magic # function
+function focus {
+	_last_add="$1"
+}
+
+function declare-buffer {
+	_last_add='set-buffer'
+	set-buffer "${1}" # name
+	buffers_l+=("$current_buffer")
+	last_line=1
+	declare -Ag "${current_buffer}_bf_t"
+	declare -Ag "${current_buffer}_bf_h"
+	declare -Ag "${current_buffer}_bf_d"
+	bf_d=(
+		# some sane default values
+		[line]=0
+		[base]=1
+		[column]=0
+		[modified]=0
+		[loc-x]=1
+		[loc-y]=1
+		[size-x]=$COLUMNS
+		[size-y]=$LINES
+		[bxrender-function]='syntax1'
+	)
+}
+
+## local-set-buffer-data
+# set bf_d[] array of currently \"focused\" buffer
+function local-set-buffer-data {
+	while [ -n "$2" ]; do
+		bf_d["$1"]="$2"
+		shift 2
+	done
+}
+
+## [auto] Checks bf_d[] array and set\'s needed missing values automatically
+## deprecated!
+function [auto] {
+	[ -z "${bf_d[loc-x]}" ] && bf_d[loc-x]=1
+	[ -z "${bf_d[loc-y]}" ] && bf_d[loc-y]=1
+	[ -z "${bf_d[size-x]}" ] && bf_d[size-x]=$COLUMNS
+	[ -z "${bf_d[size-y]}" ] && bf_d[size-y]=$((LINES - 1))
+	[ -z "${bf_d[syntax]}" ] && set-syntax 
+}
+	
+## add-highlight Sets highlighting mode '$1' for file types '$2...'
+function add-highlight {
+	local name="$1"
+	shift
+	for i in "$@"; {
+		highlight["$i"]="$name"
+	}
+}
+
+## set-alias Brings into \"focus\" highlight setting
+fn set-highlight '_last_add=set-highlight'
+
+## clear-screen clears screen
+fn clear-screen "printf '\033c'"
+
+## global-set Brings into \"focus\" global mode
+fn global-set '_last_add=global-set'
+
+## define-option Defines options[] buffer
+fn define-option 'options["$1"]="$2"'
+
+## set-options Brings into \"focus\" options setting
+fn set-options '_last_add=set-options'
+
+function menu.add {
+	# create new menu function & array
+	#eval "function ${1}.open { menu $1; }"
+	declare -ag "menu_${1}_0"
+	declare -ag "menu_${1}_1"
+	declare -ag "menu_${1}_2"
+
+	local -n menu_0="menu_${1}_0"
+	local -n menu_1="menu_${1}_1"
+	local -n menu_2="menu_${1}_2"
+
+	local -i c=-1
+	local type
+	
+	local -n menu="$1"
+	for i in "${menu[@]}"; do
+		case "$i" in
+			't:'|'text:')
+				type=text
+				((c++))
+				continue;;
+			'c:'|'cmd:'|'command:')
+				type=command
+				continue;;
+			'f:'|'face:')
+				type=face
+				continue	
+		esac
+		case "$type" in
+			'text')
+				menu_0[c]+=" $i"
+				;;
+			'command')
+				menu_1[c]+="$i "
+				;;
+			'face')
+				menu_2[c]+="$i"
+		esac
+	done
+	menu.layout "$1"
+}
+function menu.layout {
+	local -n menu_0="menu_${1}_0"
+	local -i max=0
+	for i in "${menu_0[@]}"; do
+		((${#i} > max)) && max="${#i}"
+		lax=${i}
+	done
+	for i in "${!menu_0[@]}"; do
+#		menu_0[i]+="a b c"
+		for ((l=$((max - ${#menu_0[i]})) + 1; l>0; l--)); do
+			menu_0[i]+=' '
+		done
+	done
+}
+
+## load-theme Loads theme from array
+function load-theme {
+	local -i t=0
+	local k
+	local -n theme="$1"
+	for i in "${theme[@]}"; {
+		((t==0)) && {
+			k="$i"
+			t=1
+		} || {
+			faces["$k"]="$i"
+			faces_raw["$k"]="$(printf '%b' "$i")"
+			t=0
+		}
+	}
+	((t)) && errno=1 die
+			 
+}
+
+## rest of this garbageware
+
+
+
+## switch-mode
+# Change current mode of buffer into '$1'
+function switch-mode {
+	bckmode="${bf_d[mode]}"
+	bf_d[mode]="$1"
+}
+
+## mode-back
+# Restores previous mode
+function mode-back {
+	bf_d[mode]="$bckmode"
+	unset bckmode
+}
+
+## read-command
+# Works like normal "'read'" but for bottom commanline
+function read-command {
+	local -i loc
+	[ -n "$4" ] && loc="$4" || loc=$((bf_d[size-y] + bf_d[loc-y])) 
+	printf '\e[%s;0H' "$loc"
+	printf '\e[?25h'
+	read -re -p "$1" -i "$3" "$2" || return 1
+}
+
+### TODO: make this make sense
+
+## set-buffer
+# Switch to buffer \$1 
+function set-buffer {
+	current_buffer="$1"
+	declare -ng buffer="${current_buffer}_buffer" # source
+	declare -ng bf_s="${current_buffer}_bf_s" # syntax
+	declare -ng bf_e="${current_buffer}_bf_e" # charmap
+	declare -ng bf_d="${current_buffer}_bf_d" # data
+	declare -ng bf_c="${current_buffer}_bf_c" # commands/objects
+	declare -ng bf_h="${current_buffer}_bf_h" # hooks
+	declare -ng bf_t="${current_buffer}_bf_t" # tmp cache
+}
+function switch-buffer {
+	set-buffer "$1"
+	redraw
+}
+
+## add-to-list
+# Adds a buffer into currently active buffer list
+function add-to-list {
+	buffers_l+=("$current_buffer")
+}
+
+## clear-buffer
+# Empties buffer bf_s bf_e \& bf_d
+function clear-buffer {
+	buffer=()
+	for l in "${bf_s[@]}"; {
+		unset "$l"
+	}
+	bf_s=()
+	bf_e=()
+	for l in "${bf_c[@]}"; {
+		unset "$l"
+	}
+	bf_c=()
+}
+
+## goto Load array into buffer
+function goto {
+	clear-buffer
+	bf_d[line]=1
+	bf_d[column]=0
+	copy-array "$1" buffer
+	redraw
+}
+
+function format-build {
+	[ "$2" = '{' ] || exit 1
+	declare -ng __ext_name="$1"
+	declare -g __ext_id=0
+	declare -ag __ext_type
+	__ext_type[0]='none'
+	__ext_type[1]='newline'
+	set +e
+#	PATHbak="$PATH"
+#	PATH=''
+#	trap 'eval "+ $BASH_COMMAND"' ERR
+
+	function + {
+		case "${__ext_type[-1]}" in
+			'newline') __data-new "$1";;
+			'oneline') __data-add "$1";;
+			*) : ;;
+		esac
+	}
+	function newline, { __data-new ''; }
+	function newline {
+		for ((i = 0; i < ${1::-1}; i++)); do
+			__data-new ''
+		done
+	}
+	
+	function line {
+		__ext_id=0
+		__ext_num='-1'
+		__ext_name+=('')
+		__ext_type+=('oneline')
+	}
+
+	function title { __ext_type+=('title'); }	
+	function subtitle { __ext_type+=('subtitle'); }	
+	function __data-add {
+		if ((__ext_id==0)); then
+			__ext_name[-1]+="$*"
+			__ext_id=1
+		else
+			__ext_name[-1]+=" $*"
+		fi
+	}
+	function __data-new {
+		__ext_name+=("$*")
+	}
+	function }, {
+		case "${__ext_type[-1]}" in
+			'title')
+				case "$level" in
+					'1') __data-new "<h1> $label </h1>";;
+					'2') __data-new "<h2> $label </h2>";;
+					'3') __data-new "<h3> $label </h3>";;
+					*) __data-new "<h> $label </h>";;
+				esac
+				level='';;
+			'subtitle')
+				case "$level" in
+					*) __data-new "<subh1> $label </subh1>";;
+				esac
+				level='';;
+		esac	
+		unset '__ext_type[-1]'
+	}
+}
+
+fn is-function 'declare -F -- "$1" > /dev/null'
+
+## Dumps current buffer into a file	
+function dump-buffer {
+	true >"$1" # Set the file to an empty text file
+	for ln in "${buffer[@]}"; do # Write in the buffer to the file
+		echo "$ln" >>"$1"
+	done
+}
+
+## die
+# Closes Ebashs with exit code \$errno, if errno is empty exit with 0
+# If \$nocleanup is 1, do not restore the terminal to sane mode and do not cleanup 
+# Else restore to sane mode 
+function die {
+	((nocleanup)) && exit "${errno:-0}"
+	echo -e "\e[?1000;1006;1015l" #disable mouse tracking
+	clear-screen # TODO fix the buffer switching
+	printf '\e[?25h\e[?7h\e[?1049l' # Reset terminal to sane mode
+	global-hook die
+	exit "${errno:-0}" # Assume that we are exiting without an error
+}
+
+# Sets \$nocleanup to 1 and dies	
+function die.force {
+	((nocleanup=1)) && die "$@"
+}
+
+function move.previous-line.check ((bf_d[line] > 1))
+function move.next-line.check ((bf_d[line] < ${#buffer[@]}+bf_d[last-newline]))
+
+# Moves up \$1 lines, if \$ is empty move up 1 line
+function move.previous-line {
+	for ((i = 0; i < ${1:-1}; i++)); do
+		((bf_d[line] > 1)) && ((bf_d[line]--))
+		((bf_d[line] < bf_d[base] + 1)) && {
+			((bf_d[base]--)) # Push back the top if we need to
+			move_base=1 # Send signal to redraw.cursor that the buffer was moved, thus needs to be redraw fully
+			((bf_d[base] <= 0)) && bf_d[base]=1 # Don't push back if our base is at 1
+		}
+		[ -z "$bckrl" ] && bckrl="${bf_d[column]}"	
+		(( ${#bf_e[bf_d[line]]} < bf_d[column] )) && bf_d[column]=${#bf_e[bf_d[line]]}
+		(( ${#bf_e[bf_d[line]]} > bckrl )) && bf_d[column]=${bckrl}
+	done
+}
+
+# Moves down \$1 lines, if \$ is empty move down 1 line
+function move.next-line {
+	for ((i = 0; i < ${1:-1}; i++)); do
+		((bf_d[line] < ${#buffer[@]}+bf_d[last-newline])) && ((bf_d[line]++))
+		# Move window down if needed
+		((bf_d[line] > bf_d[base] + bf_d[size-y] - 3)) && {
+			((bf_d[base]++))
+			move_base=1
+		}
+		[ -z "$bckrl" ] && bckrl="${bf_d[column]}"	
+		(( ${#bf_e[bf_d[line]]} < bf_d[column] )) && bf_d[column]=${#bf_e[bf_d[line]]}
+		(( ${#bf_e[bf_d[line]]} > bckrl )) && bf_d[column]=${bckrl}
+	done
+}
+
+function previous-line {
+	move.previous-line.check || return
+	hook pre-move
+	move.previous-line "$@"
+	hook move
+	redraw.cursor
+}
+function next-line {
+	move.next-line.check || return
+	hook pre-move
+	move.next-line "$@"
+	hook move
+	redraw.cursor
+}
+function scroll-down {
+	hook pre-move
+	move.previous-line $((bf_d[size-y] - 3))
+	hook move
+	redraw.cursor
+}
+function scroll-up {
+	hook pre-move
+	move.next-line $((bf_d[size-y] - 3))
+	hook move
+	redraw.cursor
+}
+function scroll-right {
+	((bf_d[basecolumn]++))
+	redraw
+}
+function scroll-left {
+	((bf_d[basecolumn]<=0)) && { bf_d[basecolumn]=0; return; }
+	((bf_d[basecolumn]--))
+	redraw
+}
+
+fn move-beginning-of-line 'bf_d[column]=0; redraw'
+fn move-end-of-line 'bf_d[column]="${#bf_e[${bf_d[line]}]}"; redraw'
+
+function forward-char {
+	for ((i = 0; i < ${1:-1}; i++)); do
+		case "${bf_e[${bf_d[line]}]:${bf_d[column]}+1:1}" in
+			't') bf_d[column]=$(( bf_d[column]+${#resources[tab]}));;
+			*) ((bf_d[column]++));;
+		esac
+		((bf_d[column] > ${#bf_e[${bf_d[line]}]})) && {
+			bf_d[column]=0
+			next-line
+			return
+		}
+		bckrl=
+	done
+	redraw-line.cursor
+}
+
+function backward-char {
+	for ((i = 0; i < ${1:-1}; i++)); do
+		case "${bf_e[${bf_d[line]}]:${bf_d[column]}-1:1}" in
+			't') bf_d[column]=$(( bf_d[column]-${#resources[tab]}));;
+			*) ((bf_d[column]--));;
+		esac
+		((bf_d[column] < 0)) && ((bf_d[line]==1)) && {
+			bf_d[line]=1
+			bf_d[column]=0
+		}
+		((bf_d[column] < 0)) && {
+			bf_d[column]="${#bf_e[${bf_d[line]}-1]}"
+			previous-line
+			return
+		}
+		bckrl=
+	done
+	redraw-line.cursor
+}
+	
+## forward-word
+# Moves forward to next word
+function forward-word {
+	((bf_d[column] == ${#bf_e[bf_d[line]]})) && {
+		next-line
+		move-beginning-of-line
+	}
+	while :; do
+		((bf_d[column] < ${#bf_e[bf_d[line]]})) && ((bf_d[column]++)) || break
+		case "${bf_e[bf_d[line]]:${bf_d[column]}:1}" in
+			't'|'s') break
+		esac
+	done
+	redraw
+}
+
+## backward-word
+# Moves backward to previous word
+function backward-word {
+	((bf_d[column] == 0)) && {
+		previous-line
+		move-end-of-line
+	}
+	while :; do
+		((bf_d[column] > 0)) && ((bf_d[column]--)) || break
+		case "${bf_e[bf_d[line]]:${bf_d[column]}:1}" in
+			't'|'s') break
+		esac
+	done
+	redraw
+}
+
+
+#Move cursor to line number $1 and move the line into middle of visible buffer area.
+function to-line {
+	bf_d[line]="$1"
+	bf_d[base]=$((bf_d[line] - bf_d[size-y] / 2 ))
+	redraw
+}
+
+function menu.up {
+	((menuselection > 0)) && ((menuselection--));
+	redraw.menu;
+}
+function menu.down {
+	((menuselection < ${#menu_0[@]} -1)) && ((menuselection++));
+	redraw.menu;
+}
+
+# Execute selected item in menu
+function menu.select
+for i in "${!menu_1[@]}"; {
+	((i == menuselection)) && ${menu_1[i]}
+}
+
+# Closes a menu
+function menu.exit {
+	unset bf_d[menu_x] bf_d[menu_y]			 
+	ismenu=0
+	bf_d[mode]="${modebackup}"
+	redraw
+}
+
+# Opens a menu \$1	
+function menu {
+	declare -ng menu_0=menu_${1}_0
+	declare -ng menu_1=menu_${1}_1
+	declare -ng menu_2=menu_${1}_2
+	((ismenu == 0 )) && modebackup="${bf_d[mode]}"
+	ismenu=1
+	declare -ig menuselection=0
+	bf_d[mode]='menu'
+	redraw
+}
+
+# deletes current buffer
+function delete-buffer {
+	local -a copy
+	local i=0
+	local index
+	for b in "${buffers_l[@]}"
+	do
+		[[ "$b" != "$current_buffer"  ]] && copy+=("$b")
+		[[ "$b" = "$current_buffer"  ]] && index="$i"
+		((i++))
+	done
+	unset buffers_l
+	copy-array copy buffers_l
+	current_buffer="${buffers_l[index-1]}"
+	redraw
+}
+
+# Handle changing size of terminal
+function change-size-screen {
+	bf_d[size-x]="$COLUMNS"
+	bf_d[size-y]=$((LINES-1))
+	redraw
+}
+
+# function scene {
+# 	[ "$2" = '{' ] || exit 1
+# 	declare -ng scene="sc_${1}"
+# 	declare -g sc_i=0
+# 	declare -ag sc_s
+# 	sc_t[0]='none'
+# 	sc_t[1]='newline'
+		
+# 	function buffer {
+# 		scene+=('<buffer>')
+# 		scene+=("${1}")
+# 		sc_t+=('buffer')
+# 		sc_s+=("${1}")
+# 	}
+
+# 	function scale: {
+# 		scene+=('<scale>')
+# 		scene+=('full')
+# 	}
+	
+# 	function }, {
+# 		case "${sc_t}" in
+# 			'buffer') scene+=('<commit>');;
+# 			'buffer') scene+=("${sc_s[-1]}");;
+# 		esac
+# 		unset 'sc_t[-1]'
+# 		unset 'sc_s[-1]'
+# 		scene+=('<close>')
+# 	}
+# }
+
+# function scene.render {
+# 	declare -ng scene="sc_${1}"
+# 	print-array scene > d
+# 	for pk in "${scene[@]}"; do
+# 		 case "${__expect}" in
+# 			 'bf') set-buffer "$pk"; __expect='';;
+# 			 *) :;;
+# 		 esac
+# 		 case "${pk}" in
+# 			 '<buffer>') __expect="bf";;
+# 			 '<scale>') __expect="scale";;
+# 			 '<close>') __expect="close";;
+# 		 esac
+# 		 done
+#  }
+ 
+## redraw
+# Redraw screen
+## hooks
+# stored in bf_h ass. array
+# naming scheme is '<function> <name>', function name is handled automatically when defining a hook via @hook
+function @hook {
+	local name="${FUNCNAME[1]} $1"
+	shift
+	[ -n "${bf_h[${name}]}" ] && {
+		${bf_h[${name}]} "$@"
+		return 0
+	}
+	return 1
+}
+# common hooks, without function prefix
+function hook {
+	local name="$1"
+	shift
+	[ -n "${bf_h[${name}]}" ] && {
+		${bf_h[${name}]} "$@"
+		return 0
+	}
+	return 1
+}
+# global hooks, shared in every buffer
+function global-hook {
+	local name="$1"
+	shift
+	[ -n "${hooks[${name}]}" ] && {
+		${hooks[${name}]} "$@"
+		return 0
+	}
+	return 1
+}
+
+## insert-word
+# Insert \$1 to buffer
+function insert-word {
+	local -i rlr
+	unset ta
+	local ta
+	ta=${bf_e[${bf_d[line]}]:0:${bf_d[column]}}
+	ta=${ta//[^t]}
+	ta=${#ta}
+	rlr=$((bf_d[column] + ta / 4 - ta))
+	buffer[bf_d[line]]="${buffer[${bf_d[line]}]:0:${rlr}}$1${buffer[${bf_d[line]}]:${rlr}}"
+	#add at cursor position - amount of tabs * tab size
+	make-render-line
+	forward-char "${#1}"
+	redraw
+	bf_d[modified]=1
+}
+
+
+function init-var {
+	trap change-size-screen WINCH ALRM # Attach WINCH and ALRM to redraw the screen
+	trap die EXIT HUP USR1 # Attach most exit codes to cleanup and exit
+	trap 'k_hex=(3 0); keypress' INT
+	trap quit SIGTERM
+
+	format_tab=4
+	reset='\e[0;0m'
+	charmap=(
+		#[0] is reserved for any unmapped char
+		[	]='t' # tab
+		[ ]='s' # space
+	)
+	if ((options[esc-to-meta])); then
+		esc_timeout=123456789 # a very big number
+	else
+		esc_timeout=0.01
+	fi
+	nlchar='\n'
+	printf '\e[?1049h'
+	((options[mouse])) && echo -ne "\e[?1000;1006;1015h" #enable mouse tracking
+}
+
+#!/bin/bash
+## bxstrudel
+function string:lenght {
+	local input="$1"
+	local total_width=0
+	local char
+
+	while IFS= read -rn1 char; do
+		test -z "$char" && break 
+		local cdp=$(printf '%d' "'${char}")
+		((total_width += 1))
+		# Check for double-width characters using Unicode ranges
+		((
+			(cdp >= 0x1100 && cdp <= 0x115F) ||
+				(cdp >= 0x2E80 && cdp <= 0xA4CF) ||
+				(cdp >= 0xAC00 && cdp <= 0xD7A3) ||
+				(cdp >= 0xF900 && cdp <= 0xFAFF) ||
+				(cdp >= 0xFE10 && cdp <= 0xFE6F) ||
+				(cdp >= 0xFF00 && cdp <= 0xFF60) ||
+				(cdp >= 0xFFE0 && cdp <= 0xFFE6) ||
+				(cdp >= 0x1F300 && cdp <= 0x1F64F) ||
+				(cdp >= 0x1F900 && cdp <= 0x1F9FF) ||
+				(cdp >= 0x20000 && cdp <= 0x2FFFD) ||
+				(cdp >= 0x30000 && cdp <= 0x3FFFD)
+		)) &&
+			((total_width += 1))
+	done <<< "$input"
+
+	echo "$total_width"
+}
+function string:sub {
+	local input="$3"
+    local start="$1"
+    local end="$2"
+    local width=0
+    local char
+    local output=""
+
+    while IFS= read -rn1 char; do
+        [[ -z "$char" ]] && break  # Stop processing when reaching the end
+
+        # Get the Unicode codepoint of the character
+        local ord=$(printf '%d' "'${char}")
+        local char_width=1
+
+        # Check for double-width characters
+        if (( \
+              (ord >= 0x1100 && ord <= 0x115F) || \
+				  (ord >= 0x2E80 && ord <= 0xA4CF) || \
+				  (ord >= 0xAC00 && ord <= 0xD7A3) || \
+				  (ord >= 0xF900 && ord <= 0xFAFF) || \
+				  (ord >= 0xFE10 && ord <= 0xFE6F) || \
+				  (ord >= 0xFF00 && ord <= 0xFF60) || \
+				  (ord >= 0xFFE0 && ord <= 0xFFE6) || \
+				  (ord >= 0x1F300 && ord <= 0x1F64F) || \
+				  (ord >= 0x1F900 && ord <= 0x1F9FF) || \
+				  (ord >= 0x20000 && ord <= 0x2FFFD) || \
+				  (ord >= 0x30000 && ord <= 0x3FFFD) \
+           )); then
+            char_width=2
+        fi
+
+        if (( width + char_width > end )); then
+            break
+        fi
+        
+        if (( width >= start )); then
+            output+="$char"
+        fi
+        
+        (( width += char_width ))
+    done <<< "$input"
+
+    echo "$output"
+}
+
+
+fix-0.11.7-Ex
+load-default-config
+stty -echo
+
+hooks+=(
+	[die]='finish'
+)
+
+function finish {
+	stty echo
+	send-cmd quit
+	rm "$socket"
+}
+zvu_f=(
+	#header "$(:weight bold :background light-cyan :foreground black)"
+	header "$(:weight bold :foreground light-cyan :underline t)"
+	statusbg "$(:foreground light-yellow)"
+	line-number "$(:weight dim :foreground cyan)"
+	line-number-current-line "$(:weight bold :foreground light-cyan :mode inverse)"
+	list '\e[m'
+#	list "\e[m$(:foreground blue :weight bold)"
+	list-alt "\e[m$(:foreground white :slant italic :weight dim)"
+	list-link "$(:foreground magenta )"
+)
+load-theme zvu_f
+
+declare-buffer title
+bf_d+=(
+	[mode]=basic
+	[syntax]=syntax-none
+	[syntax-exec]=0
+	[render-type]=per-line
+	[background]=header
+	[line]=1
+)
+buffer=(
+	''
+	'ZVUk MPV AUDIO PLAYER    ©Netkv 2025'
+)
+
+
+add-mode basic
+:: '[left]' format-left
+:: '[right]' goto-list
+:: '[down]' format-down
+:: RET link-enter
+:: C-c die
+mode-options
+:: else :
+		
+declare-buffer side
+bf_d+=(
+	[mode]=basic
+	[syntax]=syntax-format
+	[syntax-exec]=1
+	[render-type]=per-char
+	[line]=1
+)
+buffer=(
+	''
+	'<o> id: file select: toggle-info text: <f> hint-highlight F </f> <> <f> hint ile </f> </o>'
+	'<o> id: open select: picker.open text: <f> hint-highlight O </f> <> <f> hint pen </f> </o>'
+	'<o> id: shuffle select: shuffle text: <f> hint-highlight S </f> <> <f> hint huffle </f> </o>'
+	'<o> id: reverse select: reverse text: <f> hint-highlight R </f> <> <f> hint everse </f> </o>'
+	'<o> id: quit select: die text: <f> hint-highlight Q </f> <> <f> hint uit </f> </o>'
+	'<o> id: output select: file-info text: <f> hint M </f> <> <f> hint ore info  </f> </o>'
+	''
+)
+function picker.open {
+	state=paused
+	file-picker . picker.finish
+}
+function picker.finish {
+	open-playlist "$1"; set-buffer status
+	setsizes
+}
+
+function make-render-line-loop-line-wide-hack {
+	local -i comment=0
+	local -i skip_next_space=0
+	
+	local word=''
+	bf_e[line]=''
+
+	for _link in ${bf_c[line]}; do
+		unset "$_link"
+	done
+	unset bf_c[line]
+	
+	column=0
+	coproc {
+		if (("${#buffer[line+1]}" > (bf_d[size-x]/2) )); then
+			word="$(string:sub 0 $((bf_d[size-x]-3)) "${faces_raw[list-alt]}${buffer[line+1]}")"
+		else
+			echo "${faces_raw[list-alt]}${buffer[line+1]}"
+		fi
+	}
+	if (("${#buffer[line]}" > (bf_d[size-x]/2) )); then
+		word="$(string:sub 0 $((bf_d[size-x]-3)) "${buffer[line]}")"
+	else
+		word="${buffer[line]}"
+	fi
+	while IFS='' read -r; do other="$REPLY"; break; done <&"${COPROC[0]}"	
+	syntax-word
+	
+	((line++))
+	local -i syntaxline=$line
+	local -n linearray="${current_buffer}_syntax${syntaxline}"
+	bf_s[syntaxline]="${current_buffer}_syntax${syntaxline}"
+	linearray=()
+	bckeIFS="${IFS}"
+	IFS=
+	local -a s
+	local -i comment=0
+	local -i skip_next_space=0
+	local word=''
+	bf_e[line]=''
+	for _link in ${bf_c[line]}; do
+		unset "$_link"
+	done
+	unset bf_c[line]
+	column=0
+	word="$other"
+	syntax-word
+}
+
+
+declare-buffer playlist
+bf_d+=(
+	[mode]=basic
+	[syntax]=syntax-playlist
+	[syntax-exec]=0
+	[bxrender-function]='make-render-line-loop-line-wide-hack'
+	[background]=list
+	[line]=1
+)
+bf_h=(
+	[redraw.content begin]=linenum.begin
+	[redraw.content loop-begin]=linenum.loop-begin
+	[redraw.cursor pre-redraw]=linenum.update
+)
+function setsizes {
+	set-buffer title
+	bf_d+=(
+		[size-y]=1
+		[size-x]="$COLUMNS"
+	)
+	redraw
+	set-buffer side
+	bf_d+=(
+		[loc-y]=2
+		[size-y]="$((LINES-5))"
+		[size-x]=10
+		[loc-x]=1
+	)
+	redraw
+	set-buffer playlist
+	bf_d+=(
+		[loc-y]=2
+		[size-y]="$((LINES-5))"
+		[size-x]="$((COLUMNS-10))"
+		[loc-x]=11
+	)
+	redraw
+	set-buffer status
+	bf_d+=(
+		[loc-y]="$((LINES-3))"
+		[size-y]=4
+		[size-x]="$COLUMNS"
+	)
+	redraw
+}
+
+function syntax-playlist {
+	set-face list
+	case "$word" in
+		*'.m3u'|*'.m3u8') set-face list-link;;
+	esac
+}
+
+function load-tags {
+	declare -Ag "$1"
+    local -n tags="$1"
+    local file="$2"
+    
+    while IFS='=' read -r key value; do
+		key=$(echo "$key" | tr '[:lower:]' '[:upper:]' | tr ' ' '_')
+        tags["$key"]="$value"
+    done < <(
+		ffprobe -v error -select_streams a:0 -show_entries format_tags -of flat=s=_ "$file" |
+			sed -E 's/format_tags\.//g' |
+			tr -d '"'
+	)
+}
+
+function preset {
+	base-name "$1"
+}
+function open-playlist {
+	just_open=1
+	set-buffer playlist
+	clear-render
+	buffer=()
+	list=()
+	bf_d[line]=1
+	mapfile -t -O 1 list < "$1"
+	transform-array preset list buffer
+}
+function open-dir {
+	just_open=1
+	set-buffer playlist
+	clear-render
+	buffer=()
+	list=()
+	bf_d[line]=1
+	mapfile -t -O 1 list <<< "$(list-directory)"
+	
+	transform-array preset list buffer
+}
+function open-stdin {
+	just_open=1
+	set-buffer playlist
+	clear-render
+	buffer=()
+	list=()
+	bf_d[line]=1
+
+	IFS=$'\n'
+	list=('')
+	while read -r line; do
+		list+=("$line")  
+	done
+	
+	transform-array preset list buffer
+}
+function shuffle {
+	copy-array list bck
+
+	just_open=1
+	set-buffer playlist
+	clear-render
+	list=()
+	bf_d[line]=1
+	print-array bck | shuf | mapfile -t -O 1 list
+	transform-array preset list buffer
+	redraw
+	set-buffer status
+	redraw
+}
+
+function reverse {
+	copy-array list bck
+	just_open=1
+	set-buffer playlist
+	clear-render
+	list=()
+	bf_d[line]=1
+	reverse-array bck list
+	transform-array preset list buffer
+	redraw
+	set-buffer status
+	redraw
+}
+
+declare-buffer status
+bf_d+=(
+	[mode]=control
+	[syntax]=syntax-status
+	[syntax-exec]=0
+	[render-type]=per-frag
+	[background]=statusbg
+	[line]=1
+)
+buffer=(
+	''
+)
+function syntax-status {
+	set-face hint
+	case "$word" in
+		*':') set-face title;;
+	esac
+}
+
+add-mode control
+	:: '[up]' list-prev
+	:: '[down]' list-next
+	:: '[right]' seek-forth
+	:: '[left]' seek-back
+	:: 'DEL' goto-side
+	:: C-k act
+	:: "$(kbd f)" toggle-info
+	:: "$(kbd o)" picker.open
+	:: "$(kbd s)" shuffle
+	:: "$(kbd r)" reverse
+	:: "$(kbd q)" die
+	:: SPC toggle
+	:: RET play
+	:: C-c die
+	mode-options
+		:: else :
+
+
+
+act=(
+	text: '!?'
+		face: menu-highlight
+	text: a
+		cmd: :
+	text: b
+		cmd: :
+		face: menu-divider
+	text: Closeaaaaaaaaaaaa
+		cmd: menu.exit
+	text: Quit
+		cmd: die
+)
+menu.add act
+function act {
+	menu_act_0[0]=' hello '
+	menu_act_0[1]=' hello '
+	menu_act_0[2]=' hello '
+	menu.layout act
+	bf_d[menu_x]=$((playlist_bf_d[loc-x] + 2))
+	bf_d[menu_y]=$((playlist_bf_d[loc-y] + playlist_bf_d[line] -1))
+	menu act
+}
+function goto-side {
+	set-buffer side
+	redraw.cursor
+}
+function goto-list {
+	get-status
+}
+function list-next {
+	set-buffer playlist
+	format-down
+	set-buffer status
+}
+function list-prev {
+	set-buffer playlist
+	format-up
+	set-buffer status
+}
+function play {
+	set-buffer playlist
+	send-cmd stop
+	send-cmd-arg3 loadfile "${list[${bf_d[line]}]}" append-play
+	load-tags t "${list[${bf_d[line]}]}"
+	format-down
+
+	artist="${t[FORMAT_TAGS_ARTIST]}"
+	title="${t[FORMAT_TAGS_TITLE]}"
+	set-buffer status
+	get-status
+}
+function toggle {
+	echo '{ "command": ["cycle", "pause"] }' | sock
+	get-status
+}
+
+function toggle-info {
+	if ((options[info-name]==0))
+	then options[info-name]=1
+	else options[info-name]=0
+	fi
+	get-status
+}
+
+function get-status {
+	[ ! "$current_buffer" = status ] && return
+	set-buffer status
+	currentfile="$(
+		echo '{ "command": ["get_property", "path"] }' | socat - "$socket" | jq -r '.data'
+			   )"
+	[ "${currentfile}" = 'null' ] && {
+		set-buffer playlist
+		send-cmd stop
+		send-cmd-arg3 loadfile "${list[${bf_d[line]}]}" append-play
+		format-down
+		set-buffer status
+		((just_open==1)) && {
+			just_open=0
+			toggle
+		}
+		return
+	}
+	bitrate="$(
+   		echo '{ "command": ["get_property", "audio-bitrate"] }' | socat - "$socket" | jq -r '.data'
+			 )"
+	filesize="$(
+		echo '{ "command": ["get_property", "file-size"] }' | socat - "$socket" | jq -r '.data'
+			 )"
+	totaltime="$(
+		echo '{ "command": ["get_property", "duration"] }' | socat - "$socket" | jq -r '.data'
+			 )"
+	currenttime="$(
+		echo '{ "command": ["get_property", "time-pos"] }' | socat - "$socket" | jq -r '.data'
+			   )"
+	case "$(
+			echo '{ "command": ["get_property", "pause"] }' | socat - "$socket" | jq -r '.data'
+		)" in
+		true)
+			state="paused"
+			_i=0
+			printf '\e[38;5;51m\e[%s;8H%s\e[%s;16H%s\e[m' "$((_i+4))" "▄▄▄" "$((_i+4))" "▄▄▄"
+			for ((_i=1;i<7;i++)); do
+				printf '\e[38;5;51m\e[%s;8H%s\e[38;5;16m%s\e[38;5;51m\e[%s;16H%s\e[38;5;16m%s\e[m' "$((_i+4))" "███" '█' "$((_i+4))" "███" '█'
+				((_i++))
+			done
+			printf '\e[38;5;16m\e[%s;9H%s%s\e[%s;17H%s%s\e[m' "$((_i+4))" "▀▀" '▀' "$((_i+4))" "▀▀" '▀'
+			;;
+		false)
+			state="playing"
+			set-buffer side; redraw
+			set-buffer playlist; redraw
+			set-buffer status
+			;;
+		*) state=idk
+	esac
+	# "${title}"
+	if ((options[info-name]==0))
+	then
+		buffer=(
+			''
+			"Playing: $(base-name "${currentfile}")"
+			"time:    ${currenttime}/${totaltime}"
+			"State:   ${state}"
+			"Artist:  ${artist}"
+		)
+	else
+		buffer=(
+			''
+			"File: $(base-name "${currentfile}")"
+			"Rate: $((bitrate/1000))kb/s Total: $((filesize / 1024 / 1024))MiB"
+			"Type: $(file -b "${currentfile}")"
+			"Path: $(dir-name "${currentfile}")"
+		)
+	fi
+	bf_s=()
+	redraw.content
+}
+function seek-forth {
+	echo '{ "command": ["seek", 5, "relative"] }' | sock
+	get-status
+}
+function seek-back {
+	echo '{ "command": ["seek", -5, "relative"] }' | sock
+	get-status
+}
+
+socket="/tmp/zvu-mpv-${$}.sock"
+mpv --idle=yes\
+	--no-video\
+	--no-audio-display\
+	--vo=null\
+	--input-ipc-server="${socket}" > /dev/null 2>&1 < /dev/null &
+
+function send-cmd-arg3 {
+	echo '{ "command": ["'"${1}"'", "'"${2}"'", "'"${3}"'"] }' |
+		sock
+}
+function send-cmd {
+	echo '{ "command": ["'"${1}"'"] }' |
+		sock
+}
+function sock {
+	socat - "$socket" >/dev/null
+}
+
+function zvu:main {
+	while :; do
+		local -a k=()
+		local -i i=1
+		k_hex=() # Also convert the input sequence into hex for way easier handling
+		# Check for ready input
+		if {
+			# if we're paused, do not keep redrawing and wasting precious cpu cycles
+			if [ "$state" = "paused" ]; then
+				read -rsN1 k[0]
+				idle=0
+			else
+				#todo implement idle detection
+				read -rsN1 -t 1 k[0]
+			fi
+		}; then
+			k_hex[0]="$(printf "%x\n" "'${k[0]}")"
+
+			# Hack to try preventing arrow codes being split into multiple and inserting garbage to buffer
+			[ "${k_hex[0]}" = '1b' ] && {
+				read -rsN1 -t "${esc_timeout}" k[1]
+				k_hex[1]="$(printf "%x\n" "'${k[1]}")"
+				[ "${k_hex[1]}" = '5b' ] && {
+					read -rsN1 k[2]
+					k_hex[2]="$(printf "%x\n" "'${k[2]}")"
+					case "${k_hex[2]}" in
+						'41'|'42'|'43'|'44')
+							k_hex[3]='0'
+							keypress "${k[@]}"
+							continue
+					esac
+					i=2
+				}
+				((i++))
+			}
+			# Multibyte hack
+			while read -rsN1 -t0.0001 k[$i]; do
+				k_hex[$i]="$(printf "%x\n" "'${k[$i]}")"
+				((i++))
+			done
+			k_hex[$i]='0'
+			keypress "${k[@]}" # Handle keypress event
+		else
+			prevl="$LINES"
+			prevc="$COLUMNS"
+			shopt -s checkwinsize && (:;:)
+			[ ! "$prevl" -eq "$LINES" ] || [ ! "$prevc" -eq "$COLUMNS" ] && {
+				clear-screen
+				set-buffer playlist
+				bf_s=()
+				setsizes
+			}
+			get-status
+		fi
+	done
+}
+
+
+
+
+
+
+
+########################################################################
+## TODO: make part of bxplatform layer II (and REDO: in sane way)
+declare-buffer info
+bf_d+=(
+	[line]=1
+	[column]=0
+	[mode]=basic
+	[syntax]=syntax-format
+	[syntax-exec]=1
+	[render-type]=per-char
+)
+declare-buffer infobg
+bf_d+=(
+	[mode]=empty
+	[syntax]=syntax-none
+	[syntax-exec]=0
+	[render-type]=per-word
+	[background]=header
+)
+buffer=(
+	''
+	'File properties'
+)
+
+
+function file-info {
+	set-buffer playlist
+	local file="${list[bf_d[line]]}"
+
+	set-buffer infobg
+	bf_d[size-x]=$((COLUMNS/2+2))
+	bf_d[size-y]=$((LINES/2+2))
+	bf_d[loc-x]=$((COLUMNS/4-1))
+	bf_d[loc-y]=$((LINES/4-1))
+	redraw
+	
+	set-buffer info
+	bf_d[size-x]=$((COLUMNS/2))
+	bf_d[size-y]=$((LINES/2))
+	bf_d[loc-x]=$((COLUMNS/4))
+	bf_d[loc-y]=$((LINES/4))
+#	set-linenum
+	
+	clear-buffer
+	get-file-info "$file"
+	redraw
+	obj quit
+}
+function get-file-info {
+	buffer=(
+		''
+		''
+' <o> id: next select: info-next up: : left: : right: obj previous text: <f> button <f> button-hint N </f-> ext </f> </o> '\
+'<o> id: previous select: info-previous up: : left: obj next right: obj quit text: <f> button <f> button-hint P </f-> revious </f> </o> '\
+'<o> id: quit select: info-quit up: : left: obj previous right: : text: <f> button <f> button-hint Q </f-> uit </f> </o>'
+		"<f> divider <lp> &line x/2-s/2 <f> title $1 </f> </lp> <> <lp> &line x/2-s[-2]/2 </lp> </f>"
+		''
+		"<-> $(file -b "$1")"
+		''
+		"size <f> title $(du -h -- "$1" | cut -f1) </f>"
+	)
+	[ -f "$file" ] &&
+		buffer+=("lines <f> title $(wc -l < "$1") </f> words <f> title $(wc -w < "$1") </f> chars <f> title $(wc -m < "$1") </f>")
+	buffer+=(
+		"owner <f> title $(stat -c %U "$1") </f> (group <f> title $(stat -c %G "$1") <-f> default ) </f> </f>"
+		"permissions <f> title $(stat -c %A "$1") </f>"
+		''
+		"created at $(stat -c %w "$1")"
+		"last access at $(stat -c %x "$1")"
+		"last modifiction $(stat -c %y "$1")"
+		"last status change $(stat -c %z "$1")"
+		''
+		'<f> divider <lp> &line x </lp> </f>'
+	)
+	[ -b "$1" ] && buffer+=("<f> dim block special </f>")
+	[ -c "$1" ] && buffer+=("<f> dim char special </f>")
+	[ -e "$1" ] && buffer+=("<f> dim exists </f>")
+	[ -d "$1" ] && buffer+=("<f> dim dir </f>")
+	[ -f "$1" ] && buffer+=("<f> dim regular </f>")
+	[ -g "$1" ] && buffer+=("<f> dim set-group-ID </f>")
+	[ -G "$1" ] && buffer+=("<f> dim owner by effective group-ID </f>")
+	[ -L "$1" ] && buffer+=("<f> dim symlink")
+	[ -k "$1" ] && buffer+=("<f> dim sticky")
+	[ -O "$1" ] && buffer+=("<f> dim owned by effective user-id </f>")
+	[ -p "$1" ] && buffer+=("<f> dim named pipe </f>")
+	[ -r "$1" ] && buffer+=("<f> dim read permission </f>")
+	[ -s "$1" ] && buffer+=("<f> dim size greater 0 </f>")
+	[ -S "$1" ] && buffer+=("<f> dim socket </f>")
+	[ -u "$1" ] && buffer+=("<f> dim set-user-ID </f>")
+	[ -w "$1" ] && buffer+=("<f> dim write permission granted </f>")
+	[ -x "$1" ] && buffer+=("<f> dim execute/search granted </f>")
+}
+########################################################################
+
+
+
+
+
+
+
+
+if [ -n "$1" ]; then
+	if [ -f "$1" ]; then
+		open-playlist "$1"
+	elif [ -d "$1" ]; then
+		open-dir "$1"
+	fi
+else
+	open-stdin
+fi
+
+init-var
+setsizes
+zvu:main < /dev/tty
+stty echo
