@@ -1,34 +1,50 @@
 #!/bin/bash
-#!/usr/bin/env -S nice -n 19 bash
+alacritty msg config window.padding.y=0
+alacritty msg config window.padding.x=0
 source buffermaker
-source bxstr
+#source nbx:string
 
 fix-0.11.7-Ex
 load-default-config
 stty -echo
-
+printf '\033[?7l'
 hooks+=(
 	[die]='finish'
 )
-
 function finish {
 	stty echo
 	send-cmd quit
 	rm "$socket"
 }
+options+=(
+	[accent]=green
+	[tg_norm]=1
+	[tg_keepdrawing]=1
+)
 zvu_f=(
-	#header "$(:weight bold :background light-cyan :foreground black)"
-	header "$(:weight bold :foreground light-cyan :underline t)"
-	statusbg "$(:foreground light-yellow)"
+	header "$(:weight bold :foreground "${options[accent]}" :underline t)"
+	
+	side "$(:weight bold :foreground light-"${options[accent]}" :slant italic)"
+	hiside "$(:weight bold :foreground white )"
+	
+	status-base "$(:foreground light-"${options[accent]}")"
+	hint "$(:foreground light-"${options[accent]}")"
+	status-title "$(:weight bold)"
+	
 	line-number "$(:weight dim :foreground cyan)"
 	line-number-current-line "$(:weight bold :foreground light-cyan :mode inverse)"
 	list '\e[m'
-#	list "\e[m$(:foreground blue :weight bold)"
 	list-alt "\e[m$(:foreground white :slant italic :weight dim)"
 	list-link "$(:foreground magenta )"
+
+	checkbox-disabled "$(:foreground gray :weight bold)"
+	checkbox-enabled "$(:foreground light-cyan :weight bold)"
 )
 load-theme zvu_f
-
+resources+=(
+	[checkbox-disabled]='@--'
+	[checkbox-enabled]='--@'
+)
 declare-buffer title
 bf_d+=(
 	[mode]=basic
@@ -40,14 +56,15 @@ bf_d+=(
 )
 buffer=(
 	''
-	'ZVUk MPV AUDIO PLAYER    ©Netkv 2025'
+	'ZVU[k] MPV AUDIO PLAYER    ©Netkv 2025'
 )
 
 
-add-mode basic
-:: '[left]' format-left
+add-mode sidem
+:: 'DEL' goto-list
 :: '[right]' goto-list
 :: '[down]' format-down
+:: '[up]' format-up
 :: RET link-enter
 :: C-c die
 mode-options
@@ -55,22 +72,32 @@ mode-options
 		
 declare-buffer side
 bf_d+=(
-	[mode]=basic
+	[mode]=sidem
 	[syntax]=syntax-format
 	[syntax-exec]=1
 	[render-type]=per-char
 	[line]=1
+	[background]=side
 )
 buffer=(
 	''
-	'<o> id: file select: toggle-info text: <f> hint-highlight F </f> <> <f> hint ile </f> </o>'
-	'<o> id: open select: picker.open text: <f> hint-highlight O </f> <> <f> hint pen </f> </o>'
-	'<o> id: shuffle select: shuffle text: <f> hint-highlight S </f> <> <f> hint huffle </f> </o>'
-	'<o> id: reverse select: reverse text: <f> hint-highlight R </f> <> <f> hint everse </f> </o>'
-	'<o> id: quit select: die text: <f> hint-highlight Q </f> <> <f> hint uit </f> </o>'
-	'<o> id: output select: file-info text: <f> hint M </f> <> <f> hint ore info  </f> </o>'
-	''
+	'<f> header  <lp> - 0 <> [DEL] </lp> <> <lp> _ x-s[-1] </lp> </f>'
+	'<o> id: file select: toggle-info text:  <f> hiside F </f> <> <f> side ile </f> </o>'
+	'<o> id: open select: picker.open text:  <f> hiside O </f> <> <f> side pen </f> </o>'
+	'<o> id: shuffle select: shuffle text:  <f> hiside S </f> <> <f> side huffle </f> </o>'
+	'<o> id: reverse select: reverse text:  <f> hiside R </f> <> <f> side everse </f> </o>'
+	'<o> id: begin select: begin text:  <f> hiside B </f> <> <f> side egin </f> </o>'
+	'<o> id: expand select: expand text:  <f> hiside E </f> <> <f> side xpand </f> </o>'
+#	'<o> id: switch select: expand text:  <f> side S </f> <> <f> hiside w </f> <> <f> side itch </f> </o>'
+	'<o> id: above select: expand text:  <f> hiside A </f> <> <f> side bove </f> </o>'
+	'<o> id: sdr select: sdr text:  <f> side Sub ra </f> <> <f> hiside n </f> <> <f> side dr </f> </o>'
+	'<g> tg_repeat </g> <o> id: repeat select: toggle-repeat text:  <f> side Re </f> <> <f> hiside p </f> <> <f> side eat </f> <ch> tg_repeat </ch> </o>'
+	'<g> tg_norm </g> <o> id: norm select: toggle-norm text:  <f> hiside C-n </f> <> <f> side orm </f> <ch> options[tg_norm] </ch> </o>'
+	'<g> tg_keepdrawing </g> <o> id: keepdrawing select: toggle-keepdrawing text:  <f> side Re </f> <> <f> hiside d </f> <> <f> side raw </f> <ch> options[tg_keepdrawing] </ch> </o>'
+	'<o> id: quit select: die text:  <f> hiside Q </f> <> <f> side uit </f> </o>'
+	'<o> id: output select: file-info text:  <f> side M </f> <> <f> side ore info  </f> </o>'
 )
+
 function picker.open {
 	state=paused
 	file-picker . picker.finish
@@ -80,7 +107,7 @@ function picker.finish {
 	setsizes
 }
 
-function make-render-line-loop-line-wide-hack {
+function make-render-line-loop-line-wide-hack-fast {
 	local -i comment=0
 	local -i skip_next_space=0
 	
@@ -95,13 +122,15 @@ function make-render-line-loop-line-wide-hack {
 	column=0
 	coproc {
 		if (("${#buffer[line+1]}" > (bf_d[size-x]/2) )); then
-			word="$(string:sub 0 $((bf_d[size-x]-3)) "${faces_raw[list-alt]}${buffer[line+1]}")"
+
+			#word="$(string:sub 0 $((bf_d[size-x]-3)) "${faces_raw[list-alt]}${buffer[line+1]}")"
+			string:visual-cut 0 $((bf_d[size-x]-5)) "${faces_raw[list-alt]}${buffer[line+1]}" word
 		else
 			echo "${faces_raw[list-alt]}${buffer[line+1]}"
 		fi
 	}
 	if (("${#buffer[line]}" > (bf_d[size-x]/2) )); then
-		word="$(string:sub 0 $((bf_d[size-x]-3)) "${buffer[line]}")"
+		string:visual-cut 0 $((bf_d[size-x]-5)) "${buffer[line]}" word
 	else
 		word="${buffer[line]}"
 	fi
@@ -129,13 +158,31 @@ function make-render-line-loop-line-wide-hack {
 	syntax-word
 }
 
+declare -ig eo=0
+function make-render-alter {
+	IFS=''
+	if ((eo==0)); then
+		set-face list
+		eo=1;
+	else
+		set-face list-alt
+		eo=0;
+	fi
+	case "${buffer[line]}" in
+		*'.m3u'|*'.m3u8'|*'.revm3u'|*'.ranm3u') set-face list-link;;
+	esac
+	[ -d "${list[line]}" ] && set-face list-link
+	face "$syntax_face" "${buffer[line]}"
+	IFS=' '
+}
 
 declare-buffer playlist
 bf_d+=(
 	[mode]=basic
-	[syntax]=syntax-playlist
+	#[syntax]=syntax-playlist
 	[syntax-exec]=0
-	[bxrender-function]='make-render-line-loop-line-wide-hack'
+	[bxrender-function]='make-render-alter'
+	[render-type]=per-char
 	[background]=list
 	[line]=1
 )
@@ -145,26 +192,29 @@ bf_h=(
 	[redraw.cursor pre-redraw]=linenum.update
 )
 function setsizes {
+	eo=0
+	printf '\033[?7l'
 	set-buffer title
 	bf_d+=(
 		[size-y]=1
-		[size-x]="$COLUMNS"
+		[size-x]="$((COLUMNS-11))"
+		[loc-x]=12
 	)
 	redraw
 	set-buffer side
 	bf_d+=(
-		[loc-y]=2
-		[size-y]="$((LINES-5))"
-		[size-x]=10
+		[loc-y]=1
+		[size-x]=11
 		[loc-x]=1
+		[size-y]=$((LINES-5))
 	)
 	redraw
 	set-buffer playlist
 	bf_d+=(
 		[loc-y]=2
 		[size-y]="$((LINES-5))"
-		[size-x]="$((COLUMNS-10))"
-		[loc-x]=11
+		[size-x]="$((COLUMNS-11))"
+		[loc-x]=12
 	)
 	redraw
 	set-buffer status
@@ -174,13 +224,6 @@ function setsizes {
 		[size-x]="$COLUMNS"
 	)
 	redraw
-}
-
-function syntax-playlist {
-	set-face list
-	case "$word" in
-		*'.m3u'|*'.m3u8') set-face list-link;;
-	esac
 }
 
 function load-tags {
@@ -196,6 +239,37 @@ function load-tags {
 			sed -E 's/format_tags\.//g' |
 			tr -d '"'
 	)
+}
+
+function expand {
+	set-buffer playlist
+	
+	copy-array:before $((bf_d[line])) list beforelist
+	copy-array:after $((bf_d[line])) list afterlist
+	if [ -d "${list[${bf_d[line]}]}" ]; then
+		mapfile -t -O 1 expandlist <<< "$(list-directory:full "${list[${bf_d[line]}]}")"
+	else
+		_ex="$(file:extension "${list[${bf_d[line]}]}")"
+		case "${_ex}" in
+			'revm3u'|'ranm3u'|'m3u'|'m3u8')
+				mapfile -t -O 1 expandlist < "${list[${bf_d[line]}]}";;
+		esac
+	fi
+
+	set-buffer playlist
+	clear-render
+	list=()
+	#bf_d[line]=1
+	copy-array beforelist list
+	append-array expandlist list
+	append-array afterlist list
+	transform-array preset list buffer
+	redraw
+	set-buffer status
+	redraw
+	beforelist=()
+	afterlist=()
+	expandlist=()
 }
 
 function preset {
@@ -218,7 +292,7 @@ function open-dir {
 	buffer=()
 	list=()
 	bf_d[line]=1
-	mapfile -t -O 1 list <<< "$(list-directory)"
+	mapfile -t -O 1 list <<< "$(list-directory:full "$1")"
 	
 	transform-array preset list buffer
 }
@@ -240,12 +314,11 @@ function open-stdin {
 }
 function shuffle {
 	copy-array list bck
-
-	just_open=1
 	set-buffer playlist
 	clear-render
 	list=()
 	bf_d[line]=1
+	bf_d[base]=1
 	print-array bck | shuf | mapfile -t -O 1 list
 	transform-array preset list buffer
 	redraw
@@ -255,11 +328,15 @@ function shuffle {
 
 function reverse {
 	copy-array list bck
-	just_open=1
 	set-buffer playlist
 	clear-render
 	list=()
-	bf_d[line]=1
+	((just_open == 0)) && {
+		##opt: logical reverse #move.previous-line 2
+		local ___diff=$((bf_d[line] - bf_d[base]))
+		bf_d[line]=$((${#buffer[@]} - bf_d[line]))
+		bf_d[base]=$((bf_d[line] - ___diff ))
+	}
 	reverse-array bck list
 	transform-array preset list buffer
 	redraw
@@ -273,7 +350,7 @@ bf_d+=(
 	[syntax]=syntax-status
 	[syntax-exec]=0
 	[render-type]=per-frag
-	[background]=statusbg
+	[background]=status-base
 	[line]=1
 )
 buffer=(
@@ -282,7 +359,7 @@ buffer=(
 function syntax-status {
 	set-face hint
 	case "$word" in
-		*':') set-face title;;
+		*':') set-face status-title;;
 	esac
 }
 
@@ -293,10 +370,28 @@ add-mode control
 	:: '[left]' seek-back
 	:: 'DEL' goto-side
 	:: C-k act
+	:: "$(kbd 8)" above
+	:: "$(kbd 2)" play
+	:: "$(kbd 6)" seek-forth
+	:: "$(kbd 4)" seek-forth
+	:: "$(kbd 5)" begin
+	:: "$(kbd 7)" shuffle
+	:: "$(kbd 1)" toggle-repeat
+	:: "$(kbd 9)" reverse
+	:: "$(kbd 3)" :
+	
 	:: "$(kbd f)" toggle-info
 	:: "$(kbd o)" picker.open
 	:: "$(kbd s)" shuffle
 	:: "$(kbd r)" reverse
+	:: "$(kbd b)" begin
+	:: "$(kbd e)" expand
+	#:: "$(kbd w)" switch
+	:: "$(kbd a)" above
+	:: "$(kbd n)" sdr
+	:: "$(kbd p)" toggle-repeat
+	:: C-n toggle-norm
+	:: "$(kbd d)" toggle-keepdrawing
 	:: "$(kbd q)" die
 	:: SPC toggle
 	:: RET play
@@ -331,10 +426,12 @@ function act {
 }
 function goto-side {
 	set-buffer side
+	bf_d[column]=1
 	redraw.cursor
 }
 function goto-list {
-	get-status
+	set-buffer status
+	redraw
 }
 function list-next {
 	set-buffer playlist
@@ -346,24 +443,104 @@ function list-prev {
 	format-up
 	set-buffer status
 }
+function above {
+	set-buffer playlist
+	format-up
+	format-up
+	play
+}
+
+
+
 function play {
+	just_open=0
 	set-buffer playlist
 	send-cmd stop
 	send-cmd-arg3 loadfile "${list[${bf_d[line]}]}" append-play
 	load-tags t "${list[${bf_d[line]}]}"
-	format-down
+	((tg_repeat==1)) || format-down
 
 	artist="${t[FORMAT_TAGS_ARTIST]}"
 	title="${t[FORMAT_TAGS_TITLE]}"
 	set-buffer status
 	get-status
 }
+
+function dir-flatten { #why the fuck doesnt this work
+	[ ! -d "$1" ] && return
+	for i in "$1"/*; do
+		return
+		path=${i//\/\//\/} # replace all double slashes
+		#skip . and ..
+		[ "${path##*/}" = '.' ] && continue
+		[ "${path##*/}" = '..' ] && continue
+		echo "$path"
+		# dont follow symbolic links
+		[ -L "$path" ] && continue
+		# recurse down dirs
+		[ -d "$path" ] && dir-flatten "$path"
+	done
+}
+
+function sdr {
+	set-buffer playlist
+	#dir-flatten "${list[${bf_d[line]}]}" | shuf | mapfile -t sdr
+	fd . "${list[${bf_d[line]}]}" | shuf | mapfile -t sdr
+	#find "${list[${bf_d[line]}]}" . | shuf | mapfile -t sdr
+	send-cmd stop
+	send-cmd-arg3 loadfile "${sdr[0]}" append-play
+	load-tags t "${list[${bf_d[line]}]}"
+
+	artist="${t[FORMAT_TAGS_ARTIST]}"
+	title="${t[FORMAT_TAGS_TITLE]}"
+	set-buffer status
+	get-status
+}
+
+function toggle-repeat {
+	case "$tg_repeat" in
+		0) tg_repeat=1
+		   list-prev
+		   ;;
+		*) tg_repeat=0
+		   list-next
+	esac
+	tg_repeat.mark
+	setsizes
+	
+}
+function toggle-norm {
+	case "${options[tg_norm]}" in
+		0) options[tg_norm]=1
+		   send-cmd-arg3 set af "lavfi=[dynaudnorm=g=3:f=250:r=0.9:p=0.9:m=10]"
+		   ;;
+		*) options[tg_norm]=0
+		   send-cmd-arg3 set af ""
+	esac
+	tg_norm.mark
+	setsizes
+	
+}
+function toggle-keepdrawing {
+	case "${options[tg_keepdrawing]}" in
+		0) options[tg_keepdrawing]=1
+		   get-status
+		   ;;
+		*) options[tg_keepdrawing]=0;;
+	esac
+	tg_keepdrawing.mark
+	setsizes
+	
+}
+
+
 function toggle {
 	echo '{ "command": ["cycle", "pause"] }' | sock
 	get-status
 }
 
 function toggle-info {
+	set-buffer status
 	if ((options[info-name]==0))
 	then options[info-name]=1
 	else options[info-name]=0
@@ -381,7 +558,7 @@ function get-status {
 		set-buffer playlist
 		send-cmd stop
 		send-cmd-arg3 loadfile "${list[${bf_d[line]}]}" append-play
-		format-down
+		((tg_repeat==1)) || format-down
 		set-buffer status
 		((just_open==1)) && {
 			just_open=0
@@ -405,14 +582,14 @@ function get-status {
 			echo '{ "command": ["get_property", "pause"] }' | socat - "$socket" | jq -r '.data'
 		)" in
 		true)
-			state="paused"
-			_i=0
-			printf '\e[38;5;51m\e[%s;8H%s\e[%s;16H%s\e[m' "$((_i+4))" "▄▄▄" "$((_i+4))" "▄▄▄"
-			for ((_i=1;i<7;i++)); do
-				printf '\e[38;5;51m\e[%s;8H%s\e[38;5;16m%s\e[38;5;51m\e[%s;16H%s\e[38;5;16m%s\e[m' "$((_i+4))" "███" '█' "$((_i+4))" "███" '█'
-				((_i++))
-			done
-			printf '\e[38;5;16m\e[%s;9H%s%s\e[%s;17H%s%s\e[m' "$((_i+4))" "▀▀" '▀' "$((_i+4))" "▀▀" '▀'
+				state="paused"
+				_i=0
+				printf '\e[38;5;51m\e[%s;8H%s\e[%s;16H%s\e[m' "$((_i+4))" "▄▄▄" "$((_i+4))" "▄▄▄"
+				for ((_i=1;i<7;i++)); do
+ 					printf '\e[38;5;51m\e[%s;8H%s\e[38;5;16m%s\e[38;5;51m\e[%s;16H%s\e[38;5;16m%s\e[m' "$((_i+4))" "███" '█' "$((_i+4))" "███" '█'
+					((_i++))
+				done
+				printf '\e[38;5;16m\e[%s;9H%s%s\e[%s;17H%s%s\e[m' "$((_i+4))" "▀▀" '▀' "$((_i+4))" "▀▀" '▀'
 			;;
 		false)
 			state="playing"
@@ -443,6 +620,10 @@ function get-status {
 	fi
 	bf_s=()
 	redraw.content
+}
+function begin {
+	echo '{ "command": ["seek", 0, "absolute"] }' | sock
+	get-status
 }
 function seek-forth {
 	echo '{ "command": ["seek", 5, "relative"] }' | sock
@@ -480,7 +661,7 @@ function zvu:main {
 		# Check for ready input
 		if {
 			# if we're paused, do not keep redrawing and wasting precious cpu cycles
-			if [ "$state" = "paused" ]; then
+			if [ "$state" = "paused" ] || ((options[tg_keepdrawing]==0)); then
 				read -rsN1 k[0]
 				idle=0
 			else
@@ -631,22 +812,28 @@ function get-file-info {
 
 
 
-
-
-
-
-
-if [ -n "$1" ]; then
-	if [ -f "$1" ]; then
-		open-playlist "$1"
-	elif [ -d "$1" ]; then
-		open-dir "$1"
-	fi
-else
+if [ -z "$1" ]; then
 	open-stdin
+elif [ -f "$1" ]; then
+	_ex="$(file:extension "$1")"
+	case "${_ex}" in
+		'revm3u')
+			open-playlist "$1"
+			reverse;;
+		'ranm3u')
+			open-playlist "$1"
+			shuffle;;
+		*)
+			open-playlist "$1"
+	esac
+elif [ -d "$1" ]; then
+	open-dir "$1"
 fi
 
 init-var
 setsizes
+((options[tg_norm])) && send-cmd-arg3 set af "lavfi=[dynaudnorm=g=3:f=250:r=0.9:p=0.9:m=10]"
 zvu:main < /dev/tty
 stty echo
+
+alacritty msg config -r
